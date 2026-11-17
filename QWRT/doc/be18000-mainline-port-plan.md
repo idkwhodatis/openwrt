@@ -1390,3 +1390,60 @@ wifi@0 {
   is available; the hardware address is 0x54 on the first I2C bus.
 - Verify `i2cdetect`, `sensors`, fan RPM/temperature, and that the EMC2301
   is not reset by the MDIO/QCA8084 reset GPIO60.
+
+### Cycle 17: Watchdog, pstore/ramoops, crash capture, bootcount
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- OpenWrt `config-6.18` has `CONFIG_QCOM_WDT=y`,
+  `CONFIG_WATCHDOG_CORE=y`, and `CONFIG_WATCHDOG_SYSFS=y`; the live QSDK
+  had `CONFIG_QCOM_WDT=y` but `# CONFIG_WATCHDOG_SYSFS is not set`, so the
+  live watchdog exposed no identity/state/bootstatus.
+- OpenWrt has `KernelPackage/pstore` (`CONFIG_PSTORE`,
+  `CONFIG_PSTORE_COMPRESS`) and `KernelPackage/ramoops`
+  (`CONFIG_PSTORE_RAM`, `CONFIG_PSTORE_CONSOLE`). `config-6.18` currently
+  has no `CONFIG_PSTORE`/`CONFIG_PSTORE_RAM`.
+- The live `bootcount` script only handles `linksys,ln6001`; it is not a
+  Xiaomi bootcounter. `0:BOOTCONFIG`/`0:BOOTCONFIG1` are all `0xFF`, and
+  `0:TRAINING` is all `0x0F`; U-Boot does not store a boot counter or reset
+  reason there on this image.
+- Live `0:APPSBLENV` flags are normal: `flag_boot_rootfs=0`,
+  `flag_boot_success=1`, `flag_boot_type=2`, `flag_last_success=0`,
+  `flag_try_sys1_failed=0`, `flag_try_sys2_failed=0`.
+- The live `crash` and `crash_syslog` MTD partitions are 0x40000 each and
+  contain empty UBI headers (one empty erase block), not logs. The live
+  `/sys/fs/pstore` was empty because `CONFIG_PSTORE` is not set; the reboot
+  forensics therefore could not prove a panic cause.
+
+**Step 2 — OpenWrt vs QSDK/bootloader**
+
+- QSDK13 has the same `watchdog@b017000` (`qcom,apss-wdt-ipq9574`,
+  `qcom,kpss-wdt`); no pstore/ramoops node is present.
+- The mainline target already has `QCOM_WDT` and watchdog sysfs, so the
+  watchdog gap is mostly a live-QSDK gap; enable the sysfs interface in
+  the mainline image and verify `/sys/class/watchdog/watchdog0`.
+- The U-Boot `BOOTCONFIG` partitions are blank; do not implement a
+  bootcounter by writing them. Use APPSBLENV flags only read/write through
+  `fw_setenv` when a failover feature is actually designed.
+
+**Step 3 — Plan delta**
+
+- Add `kmod-pstore` and `kmod-ramoops` to `DEVICE_PACKAGES`; enable
+  `CONFIG_PSTORE`, `CONFIG_PSTORE_RAM`, and `CONFIG_PSTORE_CONSOLE`.
+- Add a reserved-memory `ramoops` region outside the active WiFi/caldb
+  ranges. A candidate is `0x4dd00000` size `0x400000` (the disabled
+  `qcn9224_pcie0` window), with `record-size = <0x20000>`,
+  `console-size = <0x20000>`, `pmsg-size = <0x20000>`, and
+  `ftrace-size = <0x20000>`; verify the final `/proc/iomem` before
+  committing the address.
+- Keep `CONFIG_QCOM_WDT=y` and `CONFIG_WATCHDOG_SYSFS=y`; validate
+  `/sys/class/watchdog/watchdog0/identity`, `state`, `timeout`, and
+  `bootstatus`.
+- Do not add a Xiaomi bootcounter to `bootcount`; the live BOOTCONFIG is
+  blank and the APPSBLENV flags are normal. If a future A/B or failsafe
+  feature needs it, use `fw_setenv` with a documented flag, not raw MTD.
+- Preserve `crash`/`crash_syslog`; they are empty UBI volumes, not a
+  substitute for pstore. Do not write them from the mainline image.
+- Acceptance: a forced `echo c > /proc/sysrq-trigger` (on a test unit)
+  leaves a `pstore`/`ramoops` record after reboot, and the watchdog
+  bootstatus is readable.
