@@ -1213,3 +1213,73 @@ and use it on PPE port 5 with `phy-mode = "usxgmii"` and
   without calibration completion is a failure.
 - 2.4G may work from its valid ART/BDF before this is solved; do not
   declare the WiFi milestone complete on 2.4G alone.
+
+### Cycle 14: ath12k DT binding contract
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- The mainline `qcom,ath12k-wsi.yaml` binding accepts
+  `compatible = "pci17cb,1109"`, `reg`, `qcom,calibration-variant`,
+  `qcom,wsi-controller`, and `ports`; only `compatible` and `reg` are
+  required. Target patch `0440` adds optional `qcom,split-phy` for a fixed
+  QCN9274 split-PHY design.
+- The target `ipq9570-sbe1v1k.dts` `wifi@0` nodes use exactly the mainline
+  subset: `compatible`, `reg`, `qcom,calibration-variant`,
+  `nvmem-cells`/`nvmem-cell-names`, `ports` with `port@0`/`port@1`
+  endpoints, and `qcom,wsi-controller` on the 5G node.
+- QSDK13 uses vendor-only properties: `boot-args`, `qcom,board_id`,
+  `qcom,wsi`, `qcom,wsi_index`, `qcom,pta-num`, `qcom,coex-mode`,
+  `qcom,coex-algo`, `qcom,pta-priority`, and `caldb-addr`/`caldb-size`.
+  They are not in the mainline WSI binding.
+
+**Step 2 — OpenWrt vs QSDK property contract**
+
+- The mainline driver reads `qcom,calibration-variant` (patch 700) and
+  `qcom,wsi-controller`/`ports` (core WSI graph). It does not read
+  `qcom,board_id`, `qcom,wsi`, `qcom,wsi_index`, `boot-args`, or the QSDK
+  PTA/coex properties.
+- `qcom,split-phy` is only used when the OTP board ID is zero/invalid and
+  the QCN9274 is a fixed dual-MAC design. The live QCN9224 reports one
+  local link per chip; do not set `qcom,split-phy` unless the OTP/topology
+  probe proves it.
+- The mainline binding is strict for the WSI node but the driver also reads
+  generic `memory-region` and `nvmem-cells`; the sbe1v1k DTS is the
+  practical template. If `dtbs_check` flags those, extend the binding rather
+  than moving them to a vendor node.
+
+**Step 3 — Plan delta**
+
+Use this `wifi@0` contract for each radio (values per band):
+
+```dts
+wifi@0 {
+	compatible = "pci17cb,1109";
+	reg = <0x0 0x0 0x0 0x0 0x0>;
+	qcom,calibration-variant = "Xiaomi_BE18000_live_1";
+	/* qcom,wsi-controller; only on the pcie2/5G radio */
+	memory-region = <&qcn9224_pcie1>, <&m3_dump>;
+	nvmem-cells = <&ethaddr (-3)>;
+	nvmem-cell-names = "mac-address";
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		port@0 { reg = <0>; endpoint { remote-endpoint = <&...>; }; };
+		port@1 { reg = <1>; endpoint { remote-endpoint = <&...>; }; };
+	};
+	/* qcom,split-phy; only if the OTP/topology probe requires it */
+};
+```
+
+- Use variants `Xiaomi_BE18000_live_1/_2/_4` on pcie1/pcie2/pcie3.
+- Put `qcom,wsi-controller` only on pcie2; do not add `qcom,board_id`,
+  `qcom,wsi`, `qcom,wsi_index`, `boot-args`, or the QSDK PTA/coex
+  properties.
+- Keep `memory-region` and `nvmem-cells`; they are driver-consumed even if
+  the WSI binding does not list them. If `dtbs_check` is part of the build
+  gate, extend the binding or use a parent-node property.
+- Do not enable `qcom,split-phy` by default. The live QCN9224 is one local
+  link per chip; the property is a fallback for an OTP-invalid dual-MAC
+  QCN9274.
+- The `caldb-addr`/`caldb-size` are QSDK vendor properties; if the mainline
+  coldboot patch needs them, add them explicitly and document the driver
+  change (cycle 13), not as generic ath12k binding properties.
