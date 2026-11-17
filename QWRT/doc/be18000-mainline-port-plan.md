@@ -573,3 +573,56 @@ granular evidence and corrections.
 - Do not copy the RDP433 partition patch `0348`; the Xiaomi MIBIB table is
   different. Do not write `0:SBL1`, `0:MIBIB`, `0:APPSBL`, `0:CDT`,
   `0:QSEE`, `0:DEVCFG`, `0:APDP`, `0:ART`, or `0:ETHPHYFW`.
+
+### Cycle 4: FIT build, config, load address, and rootfs bootargs
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- `Build/fit-its` invokes `scripts/mkits.sh` with `-C`, `-a`, `-e`, `-c`
+  and the kernel/DTB; `mkits.sh` emits `configurations { default = ...; }`,
+  the kernel `compression/load/entry`, and the DTB node. It has **no**
+  `append-bootargs` option and does not emit the property.
+- The live FIT root contains only `timestamp`, `description`,
+  `#address-cells`, and `/configurations default = "config@al02-c4"`.
+  It has no `append-bootargs`.
+- The live runtime `/sys/firmware/fdt` `chosen` node has
+  `bootargs = "... root=mtd:ubi_rootfs ... rootwait ..."` and
+  `bootargs-append = " root=/dev/ubiblock0_1 ..."`.
+- The live FIT `kernel@1` is gzip, load/entry `0x42080000`; `fdt@1` is
+  `xiaomi_be18000`; the config is `config@al02-c4`.
+- QSDK13 has the same `chosen/bootargs-append = " root=/dev/ubiblock0_1
+  cnss2.enable_mlo_support=1 swiotlb=1 coherent_pool=2M"`.
+
+**Step 2 — U-Boot path**
+
+- U-Boot defines `FIT_BOOTARGS_PROP "append-bootargs"`.
+  `update_bootargs()` reads that property from the FIT root; if present it
+  appends it to the env `bootargs` (+ `rootwait`), otherwise it appends
+  `fsbootargs`.
+- The live env `fsbootargs` is
+  `ubi.mtd=rootfs root=mtd:ubi_rootfs rootfstype=squashfs
+  cnss2.enable_mlo_support=1` and does **not** contain
+  `root=/dev/ubiblock0_1`. The live ubiblock arg comes from the QSDK
+  `bootargs-append` consumer, not from the OpenWrt FIT root.
+- `do_bootipq()` checks the QFPROM secure-boot fuse: fuse clear =>
+  `do_boot_unsignedimg()`; fuse set => `do_boot_signedimg()` and
+  `qca_scm_auth_kernel()`. The live plain FIT boots through the unsigned
+  path.
+
+**Step 3 — Plan delta**
+
+- Extend `Build/fit-its`/`mkits.sh` with a device variable such as
+  `DEVICE_FIT_APPEND_BOOTARGS` (or a `-b` option) that emits
+  `append-bootargs = " root=/dev/ubiblock0_1";` at the FIT root. Add
+  `swiotlb=1 coherent_pool=2M` only if the mainline kernel needs them; omit
+  `cnss2.*`.
+- Do not rely on `chosen/bootargs-append`: it is a QSDK-side property and
+  mainline does not consume it. A DTB `chosen` property is not the FIT root
+  `append-bootargs`.
+- Keep `DEVICE_DTS_CONFIG := config@al02-c4`, gzip, `0x42080000`, and the
+  live FIT `kernel@1`/`fdt@1` node names. If config selection fails in a
+  test, set the U-Boot env `config_name=config@al02-c4` as a debug step.
+- Before flashing, read the secure-boot fuse status in the U-Boot console;
+  do not flash an unsigned mainline FIT on a fuse-set unit.
+- `CONFIG_MTD_UBI_BLOCK=y` is required for the `ubiblock0_1` rootfs path; it
+  is already present in `config-6.18`.
