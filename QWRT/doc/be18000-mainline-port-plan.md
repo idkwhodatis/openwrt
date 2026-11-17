@@ -626,3 +626,129 @@ granular evidence and corrections.
   do not flash an unsigned mainline FIT on a fuse-set unit.
 - `CONFIG_MTD_UBI_BLOCK=y` is required for the `ubiblock0_1` rootfs path; it
   is already present in `config-6.18`.
+
+### Cycle 5: QCA8084 package and NSSCC clock/reset
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- Target binding `0301` defines the QCA8084 package at `ethernet-phy-package@1`
+  with `qcom,package-mode = <QCA808X_PCS1_10G_QXGMII_PCS0_UNUNSED>`
+  (= 0), `qcom,phy-addr-fixup = <1 2 3 4 5 6 7>`, per-PHY clocks/resets for
+  PHY0-PHY3, `pcs-phy@6`, and `xpcs-phy@7`.
+- Target `0306` `qca8084_probe()` requires a per-PHY unnamed clock
+  (`devm_clk_get_enabled`) and a per-PHY reset
+  (`devm_reset_control_get_exclusive`). Target `0307` requires package clocks
+  by name and a package reset. Target `0310` requires PCS/XPCS resets and
+  clocks, including per-channel XPCS clock arrays.
+- `ipq95xx/config-default` already enables `CONFIG_IPQ_NSSCC_QCA8K=y` and
+  `CONFIG_NET_DSA_QCA8K=y`.
+- The live MDIO bus is at `90000` with `phy-reset-gpio = <&tlmm 60>`,
+  `phyaddr_fixup = <0xc90f018>`, `uniphyaddr_fixup = <0xc90f014>`, and
+  QCA8084 PHYs at addresses 1-4. The live driver uses `sgmii` (QSDK12) or
+  `qusgmii` (QSDK13) for the four ports.
+
+**Step 2 — OpenWrt vs QSDK SSDK/upstream**
+
+- Upstream v6.18 has `drivers/clk/qcom/nsscc-qca8k.c` with compatible
+  `qcom,qca8084-nsscc`; the binding title is "QCA8386/QCA8084" and the
+  example is `clock-controller@18` with `reset-gpios`. The clock/reset IDs
+  include `NSS_CC_GEPHY0_SYS_CLK`, `NSS_CC_GEPHY0_SYS_ARES`,
+  `NSS_CC_GEPHY_FULL_ARES`, `NSS_CC_SRDS1_SYS_CLK`, `NSS_CC_XPCS_ARES`.
+- The QSDK SSDK `qca8084_phy.c` uses the equivalent MHT/GCC programming:
+  `ssdk_mht_gcc_clock_init(dev_id, MHT_PHY_UQXGMII_MODE, 0)`,
+  `ssdk_mht_pinctrl_init`, `mht_port_speed_clock_set`,
+  `mht_uniphy_xpcs_speed_set`, and `ssdk_mht_port_clk_reset`. That is the
+  sequence reference for the external package.
+- The upstream NSSCC driver is an MDIO device; the QCA8084 package node's
+  clocks/resets can be wired to it. Without that node, the target
+  `qca8084_probe`/PCS/XPCS probes fail with `-ENOENT`.
+
+**Step 3 — Plan delta**
+
+Add the following `&mdio` shape (addresses/clock IDs from the binding
+example; verify the NSSCC address and reference-clock wiring against the
+QSDK SSDK):
+
+```dts
+&mdio {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	reset-gpios = <&tlmm 60 GPIO_ACTIVE_LOW>;
+	clock-frequency = <6250000>;
+
+	qca8084_nsscc: clock-controller@18 {
+		compatible = "qcom,qca8084-nsscc";
+		reg = <0x18>;
+		reset-gpios = <&tlmm 60 GPIO_ACTIVE_LOW>;
+		clocks = <&pcs0_pll>, <&qca8k_uniphy0_rx>,
+			 <&qca8k_uniphy0_tx>, <&qca8k_uniphy1_rx>,
+			 <&qca8k_uniphy1_tx>, <&qca8k_uniphy1_rx312p5m>,
+			 <&qca8k_uniphy1_tx312p5m>;
+		#clock-cells = <1>;
+		#reset-cells = <1>;
+		#power-domain-cells = <1>;
+	};
+
+	ethernet-phy-package@1 {
+		compatible = "qcom,qca8084-package";
+		reg = <1>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		qcom,package-mode = <QCA808X_PCS1_10G_QXGMII_PCS0_UNUNSED>;
+		qcom,phy-addr-fixup = <1 2 3 4 5 6 7>;
+		clocks = <&qca8084_nsscc NSS_CC_APB_BRIDGE_CLK>,
+			 <&qca8084_nsscc NSS_CC_AHB_CLK>,
+			 <&qca8084_nsscc NSS_CC_SEC_CTRL_AHB_CLK>,
+			 <&qca8084_nsscc NSS_CC_TLMM_CLK>,
+			 <&qca8084_nsscc NSS_CC_TLMM_AHB_CLK>,
+			 <&qca8084_nsscc NSS_CC_CNOC_AHB_CLK>,
+			 <&qca8084_nsscc NSS_CC_MDIO_AHB_CLK>;
+		clock-names = "apb_bridge", "ahb", "sec_ctrl_ahb", "tlmm",
+			      "tlmm_ahb", "cnoc_ahb", "mdio_ahb";
+		resets = <&qca8084_nsscc NSS_CC_GEPHY_FULL_ARES>;
+
+		ethernet-phy@1 {
+			compatible = "ethernet-phy-id004d.d180";
+			reg = <1>;
+			clocks = <&qca8084_nsscc NSS_CC_GEPHY0_SYS_CLK>;
+			resets = <&qca8084_nsscc NSS_CC_GEPHY0_SYS_ARES>;
+			qcom,xpcs-channel = <0>;
+		};
+		/* PHY@2/3/4 use GEPHY1/2/3 and channels 1/2/3 */
+		pcs-phy@6 {
+			compatible = "qcom,qca8k-pcs-phy";
+			reg = <6>;
+			clocks = <&qca8084_nsscc NSS_CC_SRDS1_SYS_CLK>,
+				 <&qca8k_uniphy1_tx312p5m>,
+				 <&qca8k_uniphy1_rx312p5m>;
+			clock-names = "pcs", "pcs_rx_root", "pcs_tx_root";
+			resets = <&qca8084_nsscc NSS_CC_SRDS1_SYS_ARES>;
+		};
+		xpcs-phy@7 {
+			compatible = "qcom,qca8k-xpcs-phy";
+			reg = <7>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			resets = <&qca8084_nsscc NSS_CC_XPCS_ARES>;
+			channel@0 { reg = <0>; /* NSS_CC_MAC1_* clocks/resets */ };
+			channel@1 { reg = <1>; /* NSS_CC_MAC2_* */ };
+			channel@2 { reg = <2>; /* NSS_CC_MAC3_* */ };
+			channel@3 { reg = <3>; /* NSS_CC_MAC4_* */ };
+		};
+	};
+};
+```
+
+- Use `phy-mode = "10g-qxgmii"` on PPE ports 1-4; QSDK13's `qusgmii` is
+  the vendor name for the same 2.5G quad-PHY mode. Package mode 0 means
+  PCS1 10G-QXGMII for PHY0-PHY3 and PCS0 unused.
+- Keep the MDIO bus `reset-gpios` and the NSSCC `reset-gpios` explicit;
+  verify whether they share GPIO60 or use separate lines. The QSDK uses
+  GPIO60 for the QCA8084 package reset.
+- The `pcs-phy@6`/`xpcs-phy@7` children are required for the 10G-QXGMII
+  SerDes path; without them the package probe can bind but link-up fails.
+- Do not describe the QCA8084 PHYs as simple `ethernet-phy@1..4` nodes:
+  the target driver requires the package join and per-PHY clocks/resets.
+- If `dmesg` shows `-ENOENT` clock/reset failures, compare the NSSCC
+  address/reference clocks and the QSDK SSDK `qca8084_phy.c` sequence first,
+  before adding a driver workaround.
