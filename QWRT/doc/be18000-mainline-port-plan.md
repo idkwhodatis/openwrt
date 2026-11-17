@@ -1046,3 +1046,62 @@ and use it on PPE port 5 with `phy-mode = "usxgmii"` and
   6G link drop/re-add, and full MLD reconnect.
 - Keep the fixed PSC ch37/6135 and no QSDK DCS; MLO is not a reason to
   enable random-channel DCS.
+
+### Cycle 11: QCN9224/QCN9274 firmware and board-2
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- `ath12k-firmware-qcn9274` installs
+  `$(PKG_BUILD_DIR)/ath12k/QCN9274/hw2.0/*` into
+  `/lib/firmware/ath12k/QCN9274/hw2.0/`; the current linux-firmware
+  QCN9274 directory contains `board-2.bin`, `firmware-2.bin`, and
+  `Notice.txt` (the 2.6 MB board-2 is the official one).
+- `ipq-wifi` installs `.QCN9274`/`.qcn9274` board files through
+  `ipq-wifi-install-ath12-one-to(..., QCN9274/hw2.0)`, i.e. it writes
+  `/lib/firmware/ath12k/QCN9274/hw2.0/board-2.bin`. The package source is a
+  git tree, so the Xiaomi board needs a local package/file or a patch.
+- The live board-2 is 292,256 bytes with variants
+  `Xiaomi_BE18000_live_1/_2/_4`, key
+  `bus=pci,qmi-chip-id=0,qmi-board-id=255`, and the live `regdb.bin`;
+  the BDFs are `bdwlan.b0001` (63,488), `b0002` (100,352), and
+  `b0004` (102,400).
+- The live QCN9224 `amss.bin` is 7,319,552 bytes and `m3.bin` 421,888;
+  QSDK13 has `amss.bin` 7,237,632 (`WLAN.WBE.1.5-01577`,
+  `9224.wlanfw.eval_v2Q`) and the same-size `m3.bin`. The live QMI reports
+  `chip_id 0`, `board_id 0xff`, `fw_version 0x110d8016`.
+
+**Step 2 — OpenWrt vs QSDK firmware format**
+
+- Mainline `fw.c` loads `ATH12K_FW_API2_FILE` (`firmware-2.bin`) and parses
+  IEs `ATH12K_FW_IE_AMSS_IMAGE`, `M3_IMAGE`, and `AMSS_DUALMAC_IMAGE`.
+  The QSDK raw `amss.bin`/`m3.bin` are **not** that container; copying them
+  into `ath12k/QCN9274/hw2.0/` will not be loaded.
+- The QSDK13 `QCN9224.ini` (`enable_mlo`, `mlo_mem_size`) and
+  `firmware_rdp_feature.ini` (`enable_cold_boot_support`) are cnss2/QCA
+  userspace inputs; mainline ath12k does not read them.
+- The official QCN9274 `firmware-2.bin` is a 15-16 MB split-firmware
+  container for QCN9274 hw2.0; the QCN9224 is not a separate upstream
+  hardware entry. PCI `17cb:1109` + QMI chip ID 0 makes the driver treat it
+  as QCN9274 hw2.0.
+
+**Step 3 — Plan delta**
+
+- Test `ath12k-firmware-qcn9274` (official `firmware-2.bin`) first with the
+  Xiaomi board-2; do not start from the QSDK raw `amss.bin`/`m3.bin`.
+- Add a local `ipq-wifi-xiaomi_be18000` package that installs the Xiaomi
+  `board-2.bin` (292,256 bytes, SHA256 `0fcbb66e...` for the live build) to
+  `/lib/firmware/ath12k/QCN9274/hw2.0/board-2.bin`. Ensure it wins over
+  the official 2.6 MB board-2; verify the final image hash.
+- Keep the variant strings `Xiaomi_BE18000_live_1/_2/_4` and the
+  `qmi-chip-id=0,qmi-board-id=255` key; they match the live QMI IDs.
+- If the official firmware fails at MHI/QMI, build a `firmware-2.bin`
+  container from the QSDK13 QCN9224 `amss.bin`/`m3.bin` (and a dual-MAC
+  image only if the topology requires it), using the official container's
+  IE/timestamp/feature layout. Record the exact IE order, sizes, and hashes.
+- Do not copy `caldata_2/3/4`, `Data.msc`, `Data_dualmac.msc`,
+  `rxgainlutSKY_6G.bin`, or `QCN9224.ini` into the mainline firmware
+  directory unless a driver probe proves it is requested. The gain LUT is
+  not loaded by the live cnss2 path.
+- If the QCN9224 is a dual-MAC/split-PHY topology, use the `qcom,split-phy`
+  property only after reading the OTP board ID; otherwise keep the default
+  single-MAC path.
