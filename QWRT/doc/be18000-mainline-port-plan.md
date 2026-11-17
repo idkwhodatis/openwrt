@@ -1105,3 +1105,55 @@ and use it on PPE port 5 with `phy-mode = "usxgmii"` and
 - If the QCN9224 is a dual-MAC/split-PHY topology, use the `qcom,split-phy`
   property only after reading the OTP board ID; otherwise keep the default
   single-MAC path.
+
+### Cycle 12: ART, BDF, and caldata mapping
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- `11-ath12k-caldata` handles only `askey,sbe1v1k`: it extracts
+  `0:ART` at 0x58800/0x8A800/0xBC800 into `cal-pci-0001/0002/0003` files.
+  Those offsets are the high-band ART caldata slots.
+- The live `0:ART` (`0x140000`, SHA256 `142dd046...`) starts with MAC
+  `a4:a9:30:19:a8:dc` and contains factory BDF/caldata containers at
+  0x1000 (63,488 B), 0x33000 (100,352 B), and 0x65000 (100,352 B),
+  matching the standard BE10000 profile. Each is followed by 568 bytes of
+  zero padding; the ART stride is 0x32000.
+- The live `0:ART` high-band slices are not contiguous calibration records:
+  0x58800 contains the 0x65000 factory BDF at +0xC800; 0x8A800 and
+  0xBC800 are entirely `0xFF`.
+- The live BDFs (`bdwlan.b0001/2/4`) are 63,488/100,352/102,400 bytes and
+  the live `regdb.bin` is 25,656 bytes. The live driver downloads
+  `regdb -> bdwlan.b0001/2/4 -> caldata_2/3/4` for PCI1/2/3.
+
+**Step 2 — OpenWrt vs QSDK13**
+
+- QSDK13 `ftm.conf` maps `ap-al02-c4` as:
+  `0001` -> ART slot 2 at 0x58800, size 63,488;
+  `0004` -> ART slot 3 at 0x8A800, size 102,400;
+  `0002` -> ART slot 4 at 0xBC800, size 100,352.
+  This is the 1/4/2 table, not the live controller order 1/2/4.
+- QSDK13's raw `caldata_2/3/4` are the BDF-size copies
+  (63,488/102,400/100,352); the live QSDK12 `caldata_1..4` are 184,320-byte
+  containers. The two QSDK generations are not interchangeable.
+- The live `wlfw_cal_01_QCN9224_PCI*.bin` files are 4-5 MiB of zeros; the
+  live ART high-band slots are blank; the factory ART BDFs are the original
+  BE10000 profile, not the modified SKY85798 profile.
+
+**Step 3 — Plan delta**
+
+- Do **not** add Xiaomi cases to `11-ath12k-caldata` for
+  0x58800/0x8A800/0xBC800. Those slices are blank or contain a factory
+  BDF, not calibration; extracting them would install invalid `cal-pci-*`.
+- Use the live BDFs `bdwlan.b0001/2/4` and live `regdb.bin` in the Xiaomi
+  board-2 with variants `Xiaomi_BE18000_live_1/_2/_4`. The ART factory
+  BDFs (`board-2-art`) are a baseline experiment only, not the modified RF
+  profile.
+- Keep the live controller order PCI1=2.4G/`live_1`, PCI2=5G/`live_2`,
+  PCI3=6G/`live_4`; do not copy QSDK13's `ftm.conf` 1/4/2 order.
+- If 2.4G needs an explicit `cal-pci-*` extraction, validate the exact
+  low-band source first; otherwise let ath12k use the board-2 BDF. Do not
+  generate high-band caldata from the ART or the zero caches.
+- `0:ART` MAC base is `a4:a9:30:19:a8:dc`; the WAN/LAN/WiFi MACs derive
+  from it, not from the QSDK `92:43:49:95:cb:ce` placeholder.
+- The `rxgainlutSKY_6G.bin` is not loaded by cnss2 and has no confirmed
+  mainline consumer; do not add it to the image as calibration.
