@@ -1283,3 +1283,53 @@ wifi@0 {
 - The `caldb-addr`/`caldb-size` are QSDK vendor properties; if the mainline
   coldboot patch needs them, add them explicitly and document the driver
   change (cycle 13), not as generic ath12k binding properties.
+
+### Cycle 15: LEDs, buttons, and GPIO/pinctrl
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- The live `leds-gpio` node has `sys_white` GPIO40, `sys_orange` GPIO41,
+  `net_white` GPIO42, `net_orange` GPIO43, and `sfp_green` GPIO62 with
+  `linux,default-trigger = "netdev"`.
+- The live `gpio_keys` node has `mesh` (GPIO44, active low, code 0x109)
+  and `reset` (GPIO45, active low, code 0x198 = `KEY_RESTART`), both
+  `linux,input-type = <1>` and `debounce-interval = <60>`.
+- The live `pwm-leds` node has `red` PWM3, `green` PWM2, `blue` PWM1,
+  `period = <0xc738>` (51,000 ns), plus the `led_ambient_rgb` container.
+- Live aliases: `led-boot`/`led-failsafe` = `led_sys_orange`,
+  `led-running`/`led-upgrade` = `led_sys_white`.
+- QSDK13 has the same LED GPIOs, but its second key is labeled `wps` with
+  code 0x211; the live unit is `reset` code 0x198. The live probe is
+  authoritative: do not copy the QSDK `wps` label.
+
+**Step 2 — OpenWrt vs QSDK/board.d**
+
+- The target has no `01_leds`/gpio-switch board.d file for Xiaomi; use DTS
+  aliases (`led-boot`, `led-running`, `led-failsafe`, `led-upgrade`) and
+  `gpio-keys`, matching sbe1v1k.
+- The live `button_pins` pinctrl group contains `mesh_button` and
+  `reset_button`; the LED node has its own pinctrl group. The PWM node and
+  the SFP pinctrl groups are separate.
+- QSDK13's `led_*` nodes and aliases match the live GPIOs but use
+  `/soc@0/leds-gpio/...` paths; mainline uses `&led_sys_white` labels.
+
+**Step 3 — Plan delta**
+
+- Add `gpio-leds` with:
+  `led_sys_white` GPIO40, `led_sys_orange` GPIO41, `led_net_white` GPIO42,
+  `led_net_orange` GPIO43, `led_sfp_green` GPIO62
+  (`linux,default-trigger = "netdev"`).
+- Add `pwm-leds` with `red` `<&pwm 3 0xc738>`, `green` `<&pwm 2 0xc738>`,
+  `blue` `<&pwm 1 0xc738>`; preserve the 51,000 ns period.
+- Add aliases: `led-boot = &led_sys_orange`,
+  `led-failsafe = &led_sys_orange`, `led-running = &led_sys_white`,
+  `led-upgrade = &led_sys_white`.
+- Add `gpio-keys` `mesh` GPIO44 (code 0x109, active low) and `reset`
+  GPIO45 (`KEY_RESTART`, active low), with `linux,input-type = <1>`,
+  `debounce-interval = <60>`, and the live `button_pins` pinctrl group.
+- Add the `button_pins`, LED, PWM, and SFP pinctrl groups from the live DT;
+  do not reuse the sbe1v1k `gpio_keys_default` pins.
+- Do not add a WPS key or copy the QSDK `wps` code 0x211. The live reset
+  button is `KEY_RESTART`; the mesh key preserves the observed 0x109 code.
+- Add `led_sfp_green` at GPIO62 even though SFP is deferred; it is a board
+  LED and can be used by `netdev` later.
