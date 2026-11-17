@@ -942,3 +942,56 @@ and use it on PPE port 5 with `phy-mode = "usxgmii"` and
 - Validation must include module detect, 1G and 10G links, and `dmesg` for
   `sfp`/`mdio-i2c` probe errors. Do not promise `ethtool -m` unless the
   module EEPROM is proven.
+
+### Cycle 9: PCIe controllers, PERST, lanes, and domains
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- `ipq9570-sbe1v1k.dts` is the mainline template: `pcie1` PERST GPIO26,
+  wake GPIO27; `pcie2` PERST GPIO29, wake GPIO30; `pcie3` PERST GPIO32,
+  wake GPIO33. Each has a `pcie@N` child with a `wifi@0`
+  (`pci17cb,1109`), calibration variant, MAC NVMEM, and WSI `ports`.
+- The Xiaomi live/Qsdk13 PERST map is different from sbe1v1k:
+  `pci@10000000` GPIO26/x1, `pci@20000000` GPIO29/x2,
+  `pci@18000000` GPIO23/x2; `pci@28000000` GPIO23/x1 is disabled.
+- Live domains are 2/3/4 for `10000000`/`20000000`/`18000000`; QSDK13
+  domains are 1/2/3; the disabled `pci@28000000` is domain 1 (live) or
+  domain 0 (QSDK13). The target `02_network` paths assume pcie1=domain1,
+  pcie2=domain2, pcie3=domain3.
+- Live link state is 8 GT/s, x1 for 2.4G, x2 for 5G/6G; endpoint BAR0 is
+  2 MiB with 32 MSI IRQs. The QSDK13 board IDs are 1/2/4 for
+  pcie1/pcie2/pcie3; WSI indices are 2/0/1.
+
+**Step 2 — OpenWrt vs QSDK domain/board mapping**
+
+- Mainline `ipq9574.dtsi` owns `linux,pci-domain`; do not copy the live
+  QSDK domains 2/3/4. The target `DEV_PATH_PCIE0/1/2` strings assume
+  pcie1=domain1, pcie3=domain3, pcie2=domain2, matching QSDK13.
+- The QSDK `qcom,board_id` is a calibration/BDF selector, not a PCI
+  property. Mainline uses `qcom,calibration-variant =
+  "Xiaomi_BE18000_live_1/_2/_4"` on pcie1/pcie2/pcie3.
+- `pcie@0` child `reg` values in sbe1v1k are 0/1/2 for pcie1/pcie2/pcie3;
+  keep that pattern and use the mainline SoC unit addresses. Do not copy the
+  QSDK `pcie1_rp`/`pcie3_rp` node names.
+
+**Step 3 — Plan delta**
+
+- Add `&pcie1` (2.4G): `perst-gpios = <&tlmm 26 GPIO_ACTIVE_LOW>`,
+  one lane (from the SoC DTSI), `pcie@0` child with `wifi@0`
+  (`pci17cb,1109`), `qcom,calibration-variant = "Xiaomi_BE18000_live_1"`,
+  WSI tx/rx ports, and `status = "okay"`.
+- Add `&pcie2` (5G): `perst-gpios = <&tlmm 29 GPIO_ACTIVE_LOW>`, two
+  lanes, `qcom,wsi-controller` on `wifi@0`, variant `_live_2`, WSI ports.
+- Add `&pcie3` (6G): `perst-gpios = <&tlmm 23 GPIO_ACTIVE_LOW>`, two
+  lanes, `pcie@0,0` child (or the mainline unit address), variant
+  `_live_4`, WSI ports.
+- Keep `pcie4`/`pci@28000000` disabled. Do not add `wake-gpios` 27/30/33
+  unless the Xiaomi board is verified to use them; the QSDK13 nodes only
+  show PERST.
+- Enable `&pcie1_phy`, `&pcie2_phy`, `&pcie3_phy` and their `pinctrl-0`
+  default states; the exact pinctrl groups are cycle 15/16 material.
+- Verify the built DTB's `linux,pci-domain` values against the
+  `02_network` `DEV_PATH_PCIE*` strings; if mainline uses different
+  domains, fix the paths rather than forcing QSDK numbers.
+- Do not use `qcom,board_id` or `qcom,wsi_index` in the mainline DTS; the
+  variants and the WSI graph carry the same information.
