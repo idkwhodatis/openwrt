@@ -446,3 +446,54 @@ granular evidence and corrections.
   and any board-specific hotplug/uci-defaults case.
 - Do not use `RC01`, `machid=8050301`, or the QSDK model string as a board
   key. They are bootloader/manufacturing identifiers only.
+
+### Cycle 2: Reserved memory, caldb, and MLO regions
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- OpenWrt `ipq9570-sbe1v1k.dts` has only a `tzapp` reserved-memory node and
+  no WiFi `memory-region`; its `wifi@0` nodes only set
+  `qcom,calibration-variant` and the 5G `qcom,wsi-controller`. There is no
+  existing Xiaomi-style 50 MiB reservation in the target.
+- The target's ath12k patches contain no `memory-region` or `caldb`
+  properties; patch 105 only assigns `device_id` from the WSI index, 109
+  adds `qcom,split-phy`, and 700 reads `qcom,calibration-variant`.
+- The live QWRT DT reserves `qcn9224_pcie1@50f00000`,
+  `qcn9224_pcie2@54100000`, and `qcn9224_pcie3@57300000`, each
+  `0x3200000` (50 MiB), `no-map`; the disabled `qcn9224_pcie0@4dd00000`
+  is the same size. It also has `m3_dump@4d600000` (`0x100000`),
+  `q6_etr_dump@1` at 0x4d700000 (`0x100000`), and a disabled
+  `q6_caldb_region@4d800000` (`0x500000`).
+
+**Step 2 — OpenWrt vs QSDK13/QCN9224.ini**
+
+- QSDK13 uses the same 50 MiB regions and adds absolute caldb addresses:
+  `0x52d00000`, `0x55f00000`, `0x59100000`, each `0x800000` (8 MiB).
+  These are exactly `region_base + 0x1e00000` (30 MiB).
+- `QCN9224.ini` sets `enable_mlo=1`, `max_ml_peer_count=145`,
+  `max_mlo_links=3`, `mlo_mem_size=0x1200000` (18 MiB). The 50 MiB region
+  has room for 18 MiB MLO plus 8 MiB caldb at +30 MiB; the live DT does not
+  state the MLO offset, so the driver/QMI request must confirm it.
+- QSDK13 `memory-region = <0x20 0x21>` for wifi1, `<0x25 0x26>` for wifi3,
+  `<0x29 0x2a>` for wifi2: index 0 is the per-radio 50 MiB region, index 1
+  is a second phandle (a `dma_pool` in QSDK, not necessarily `m3_dump`).
+  Mainline ath12k uses index 0 for HOST_DDR/BDF and index 1 for M3 dump, so
+  the second phandle must be chosen deliberately, not copied by number.
+
+**Step 3 — Plan delta**
+
+- Add the three active 50 MiB reserved-memory nodes with `no-map`, size
+  `0x3200000`; keep the disabled `qcn9224_pcie0` out of the active map (or
+  include it with `status = "disabled"`). Keep `m3_dump`/`q6_etr_dump`
+  available for the mainline `M3_DUMP` index.
+- For each `wifi@0`: `memory-region = <&qcn9224_pcieN>, <&m3_dump>;`.
+  Index 0 is the 50 MiB HOST_DDR/BDF region; index 1 is the M3 dump. Do not
+  use the QSDK `dma_pool` phandle blindly; verify the QMI request types.
+- Add `qcom,caldb-addr = <0x52d00000>` / `<0x55f00000>` / `<0x59100000>`
+  and `qcom,caldb-size = <0x800000>` to wifi1/wifi2/wifi3 respectively, or
+  a `qcom,caldb-offset = <0x1e00000>` if the driver patch is written
+  relative to the 50 MiB base. The absolute form matches QSDK13.
+- Do not use `q6_caldb_region@4d800000` (0x500000); it is the disabled
+  integrated-WiFi caldb, not the QCN9224 caldb.
+- Treat the 18 MiB `mlo_mem_size` as a QMI/MLO reservation inside the 50 MiB
+  region; the exact offset is a validation item, not a fixed DT value yet.
