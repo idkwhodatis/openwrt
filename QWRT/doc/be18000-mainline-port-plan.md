@@ -995,3 +995,54 @@ and use it on PPE port 5 with `phy-mode = "usxgmii"` and
   domains, fix the paths rather than forcing QSDK numbers.
 - Do not use `qcom,board_id` or `qcom,wsi_index` in the mainline DTS; the
   variants and the WSI graph carry the same information.
+
+### Cycle 10: WSI graph and multi-device MLO
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- Target patch `105` changes `ab->device_id = ag->num_probed++` to
+  `ag->num_probed++; ab->device_id = wsi->index;`, making the group array
+  deterministic from the WSI ring. Without it, radio0/radio1/radio2 move
+  between boots and persisted wireless configs attach to the wrong band.
+- `ipq9570-sbe1v1k.dts` is the graph template: `wifi1` has `port@0` tx to
+  `wifi2` rx and `port@1` rx from `wifi3` tx; `wifi2` is the
+  `qcom,wsi-controller` and links to `wifi3`/`wifi1`; `wifi3` closes the
+  ring.
+- The live QSDK MLO config has group 0, three chips, one local link each
+  (2.4G link 0, 5G link 1, 6G link 2), `num_adj_chips: 0`, and
+  `max_num_peers: 256`. The QSDK still forms the 3-chip group later in boot.
+- QSDK13 uses a vendor `wsi { id = 0; num_chip = 3; chip_info = <...>; }`
+  plus per-radio `qcom,wsi = <&wsi>` and `qcom,wsi_index = <2/0/1>`.
+
+**Step 2 — OpenWrt vs QSDK WSI/MLO**
+
+- Upstream `ath12k_core_get_wsi_info()` follows `port@0` endpoints via
+  `of_graph` until it returns to the starting node; it requires the ring,
+  not the QSDK `wsi` node.
+- `ath12k_core_get_wsi_index()` finds the `qcom,wsi-controller` node and
+  computes `(num_devices + node_index - controller_index) % num_devices`.
+  With the sbe1v1k ring and the 5G node as controller, the indices are
+  2/0/1 for 2.4G/5G/6G, matching QSDK13.
+- The QSDK `chip_info`/`qcom,wsi_index` are vendor shorthands; mainline
+  derives the same order from the graph. Do not copy the vendor node.
+- Mainline ath12k MLO support is present but must be treated as opt-in:
+  the live QSDK 6G recovery problem and stale-MLD reject path are
+  vendor-specific, and the mainline MLO lifecycle differs.
+
+**Step 3 — Plan delta**
+
+- Add the WSI ring to the Xiaomi DTS exactly as the sbe1v1k template:
+  `wifi1` (pcie1/2.4G) tx -> `wifi2` (pcie2/5G) rx, rx <- `wifi3`
+  (pcie3/6G) tx; `wifi2` tx -> `wifi3` rx, rx <- `wifi1` tx; `wifi3` tx
+  -> `wifi1` rx, rx <- `wifi2` tx.
+- Put `qcom,wsi-controller` only on the pcie2 (5G) `wifi@0`; use the labels
+  `wifi1_wsi_tx/rx`, `wifi2_wsi_tx/rx`, `wifi3_wsi_tx/rx`.
+- Keep the MLO feature opt-in in userspace; do not enable it in the default
+  network/wireless config. Single-radio 2.4G/5G/6G must work with MLO off.
+- Do not add QSDK `wsi { ... }`, `qcom,wsi`, or `qcom,wsi_index`
+  properties. The graph + `qcom,wsi-controller` is the mainline contract.
+- Validate dmesg for `wsi group-id ... num-devices 3 ... index 2/0/1`,
+  `mlo setup`, and `MLO ready`; then test 5G+6G MLO with a PMF/SAE client,
+  6G link drop/re-add, and full MLD reconnect.
+- Keep the fixed PSC ch37/6135 and no QSDK DCS; MLO is not a reason to
+  enable random-channel DCS.
