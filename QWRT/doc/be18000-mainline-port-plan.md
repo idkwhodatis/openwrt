@@ -752,3 +752,65 @@ QSDK SSDK):
 - If `dmesg` shows `-ENOENT` clock/reset failures, compare the NSSCC
   address/reference clocks and the QSDK SSDK `qca8084_phy.c` sequence first,
   before adding a driver workaround.
+
+### Cycle 6: PPE ports, PCS channels, and MAC mapping
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- Target `0349` gives the exact RDP433 `qcom_ppe` port pattern:
+  `port@1..4` use `pcs0_ch0..3` with `phy-handle` and per-port
+  `NSS_CC_PORTn_MAC_CLK`/`NSS_CC_PORTn_RX_CLK`/`NSS_CC_PORTn_TX_CLK` plus
+  `PORTn_MAC/RX/TX_ARES`; `port@5` uses `pcs1_ch0`; `port@6` uses
+  `pcs2_ch0`. All use `managed = "in-band-status"`.
+- Target `0324` provides `pcs0_ch0..3`, `pcs1_ch0`, and `pcs2_ch0`.
+  `pcs0` is the UNIPHY0 quad channel block; `pcs1` is UNIPHY1; `pcs2` is
+  UNIPHY2.
+- The live `qcom,port_phyinfo` is:
+  port@0..3 => port_id 1..4, PHY 1..4 (QCA8084 2.5G);
+  port@4 => port_id 5, PHY 0, C45 (AQR113C);
+  port@5 => port_id 6, PHY 0x1e, reset GPIO64, `media-type = "sfp"`.
+- Live `dp1..dp6` use `qcom,id 1..6`, `phy-mdio-addr 1/2/3/4/0/0x1e`, and
+  QSDK12 `sgmii` (QSDK13 `qusgmii` for dp1-4, `usxgmii` for dp5/6).
+- QSDK12 `dp1..dp4` are at `0x3a001000..0x3a001600`; QSDK13 moves them to
+  `0x3a500000..0x3a50c000`. These are vendor DP register addresses; mainline
+  `qcom_ppe` ports are addressed by `reg = <1..6>`, not those addresses.
+
+**Step 2 — OpenWrt vs QSDK mapping**
+
+- QSDK's `port_id 1..6` matches mainline `port@1..6`; the QCA8084 ports are
+  PCS0 channels 0-3, the AQR is PCS1 channel 0, and the SFP is PCS2 channel 0.
+- QSDK12 `sgmii` on dp1-4 is only 1G; QSDK13 `qusgmii` is the 2.5G quad
+  mode. Mainline must use `10g-qxgmii` for the QCA8084 ports (the target PCS
+  driver's 4 x 2.5G mode), not `sgmii`.
+- QSDK `dp1` carries the WAN/base MAC `a4:a9:30:19:a8:dc`; the live ART
+  first MAC matches. QSDK `dp4..dp6` share `92:43:49:95:cb:ce`, a placeholder
+  that must not be copied into mainline.
+
+**Step 3 — Plan delta**
+
+- Add the `&qcom_ppe` shape with six ports:
+
+| Port | Device | `phy-mode` | `pcs-handle` | `phy-handle` |
+|---|---|---|---|---|
+| 1 | QCA8084 PHY1 @1 | `10g-qxgmii` | `pcs0_ch0` | `qca8084_phy1` |
+| 2 | QCA8084 PHY2 @2 | `10g-qxgmii` | `pcs0_ch1` | `qca8084_phy2` |
+| 3 | QCA8084 PHY3 @3 | `10g-qxgmii` | `pcs0_ch2` | `qca8084_phy3` |
+| 4 | QCA8084 PHY4 @4 | `10g-qxgmii` | `pcs0_ch3` | `qca8084_phy4` |
+| 5 | AQR113C @0 (C45) | `usxgmii` | `pcs1_ch0` | `aqr113c` |
+| 6 | SFP+ @0x1e | `usxgmii` | `pcs2_ch0` | `sfp_phy` (deferred) |
+
+- Each port node needs the RDP433 clock/reset triple from `0349`
+  (`NSS_CC_PORTn_MAC/RX/TX_CLK`, `PORTn_MAC/RX/TX_ARES`) and
+  `managed = "in-band-status"`. Use `&nsscc` (IPQ9574 NSSCC), not a QCA8K
+  switch node.
+- Use MACs from `0:ART` (`mac-base`, offset 0): WAN/base = first MAC,
+  LAN = +1, WiFi = +2/+3/+4; do not copy the QSDK placeholder
+  `92:43:49:95:cb:ce`. Add `nvmem-cells`/`nvmem-cell-names = "mac-address"`
+  to each port or set them in `02_network`.
+- Keep the QCA8084 ports on `pcs0` channels 0-3; do not put the QCA8084
+  package's internal PCS on `pcs1`/`pcs2`. The QCA8084 package's own
+  PCS1/XPCS is the PHY-side 10G-QXGMII block; the SoC `pcs0` is the MAC-side
+  block.
+- Port 5/6 `usxgmii` matches the QSDK13 modes and the target PCS driver's
+  USXGMII support; the SFP port is deferred until the wired ports are
+  stable.
