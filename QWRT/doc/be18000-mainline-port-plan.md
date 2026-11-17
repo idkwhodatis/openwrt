@@ -1157,3 +1157,59 @@ and use it on PPE port 5 with `phy-mode = "usxgmii"` and
   from it, not from the QSDK `92:43:49:95:cb:ce` placeholder.
 - The `rxgainlutSKY_6G.bin` is not loaded by cnss2 and has no confirmed
   mainline consumer; do not add it to the image as calibration.
+
+### Cycle 13: Coldboot CALDB and firmware flags
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- The target's ath12k patch set has no `caldb`/`coldboot` change. Mainline
+  v6.18 `qmi.c` has:
+  - `case CALDB_MEM_REGION_TYPE:` in the allocation switch, which calls
+    `ath12k_qmi_alloc_chunk()` (DMA coherent, sets `chunk->paddr`);
+  - `case CALDB_MEM_REGION_TYPE:` in `assign_target_mem_chunk()`, which
+    sets `paddr = 0` with the comment "Cold boot calibration is not enabled
+    in Ath12k".
+- The live QSDK coldboot-calibrates all three radios:
+  `Sending mode message, mode: COLDBOOT CALIBRATION(7)` and
+  `Coldboot Calibration completed successfully for device 0x1109`.
+- The live/QSDK13 caldb regions are 8 MiB inside the 50 MiB per-radio
+  regions: `0x52d00000`, `0x55f00000`, `0x59100000`.
+- The `/data/vendor/wifi/wlfw_cal_01_QCN9224_PCI*.bin` cache files are
+  4-5 MiB of zeros; the ART high-band slices are blank. There is no
+  extractable calibration cache.
+
+**Step 2 — OpenWrt vs QSDK13 coldboot flags**
+
+- QSDK13 `firmware_rdp_feature.ini` sets
+  `ap-al02-c4_qcn9224_pci1/2/3_enable_cold_boot_support=1`.
+  `QCN9224.ini` sets `enable_mlo=1`, `max_mlo_links=3`,
+  `mlo_mem_size=0x1200000`.
+- QSDK13 `be18000-board.dts` gives each QCN9224
+  `qcom,caldb-addr`/`caldb-size` (8 MiB). Mainline ath12k does not read
+  these properties and does not load the QSDK INI files.
+- **Derived:** the mainline driver can allocate a CALDB DMA chunk if the
+  firmware requests `CALDB_MEM_REGION_TYPE`, but it does not provide the
+  QSDK fixed address or coldboot INI. Whether the official QCN9274
+  `firmware-2.bin` requests CALDB on the QCN9224 is the open question.
+
+**Step 3 — Plan delta**
+
+- First test the official QCN9274 `firmware-2.bin` and capture the QMI
+  target-memory request types. If `CALDB_MEM_REGION_TYPE` appears, confirm
+  the DMA chunk allocation and the coldboot completion message.
+- If CALDB is not requested, implement the fixed path: add the
+  `qcom,caldb-addr`/`qcom,caldb-size` properties to each `wifi@0` (or a
+  `qcom,caldb-offset = <0x1e00000>` relative to the 50 MiB region) and
+  patch `ath12k_qmi_assign_target_mem_chunk()` to set the CALDB paddr from
+  the reserved region instead of zero.
+- Keep the 8 MiB caldb size and the addresses `0x52d00000`/`0x55f00000`/
+  `0x59100000`; do not overlap the 18 MiB MLO area or the 50 MiB region
+  boundary.
+- If the QCN9274 firmware cannot enable coldboot for the QCN9224, the
+  fallback is a QCN9224 firmware/INI path (cycle 11), not blank ART or zero
+  caches.
+- Acceptance: per-radio `Coldboot Calibration completed` (or equivalent),
+  sane txpower/rates, and a 5G/6G client association. A firmware boot
+  without calibration completion is a failure.
+- 2.4G may work from its valid ART/BDF before this is solved; do not
+  declare the WiFi milestone complete on 2.4G alone.
