@@ -1447,3 +1447,67 @@ wifi@0 {
 - Acceptance: a forced `echo c > /proc/sysrq-trigger` (on a test unit)
   leaves a `pstore`/`ramoops` record after reboot, and the watchdog
   bootstatus is readable.
+
+### Cycle 18: Sysupgrade, platform.sh, U-Boot env, and recovery
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- `ipq95xx/base-files/lib/upgrade/platform.sh` has no Xiaomi case. The
+  current `platform_do_upgrade` only handles kiwi/sbe1v1k (both eMMC) and
+  ln6001; the default is `default_do_upgrade`, not the NAND path.
+- OpenWrt `nand.sh` supports `CI_KERNPART=kernel`, `CI_ROOTPART=rootfs`,
+  `CI_DATAPART=rootfs_data`; `nand_upgrade_prepare_ubi()` removes/recreates
+  the kernel/rootfs/rootfs_data volumes and can use `ubiformat`.
+- The live U-Boot `bootipq` reads the FIT from the UBI `kernel` volume in
+  the `rootfs` mtd partition; the `rootfs` partition is mtd24,
+  0x1780000/0xbe00000.
+- The live `0:APPSBLENV` is a text env in mtd17, 0x1100000/0x80000; the
+  dump's CRC matches a 0x40000 env size, while the README notes a live
+  `fw_env.config` uses 0x40000. There is no `fw_env.config` in the dump.
+
+**Step 2 — OpenWrt vs QSDK13/U-Boot**
+
+- QSDK13 ships a `nand.sh` with the same `nand_do_upgrade` and
+  `nand_upgrade_prepare_ubi` flow; its `platform.sh` is only 548 bytes and
+  does not add a Xiaomi-specific kernel/rootfs name.
+- The stock U-Boot web recovery "Firmware" page may expect a vendor
+  sysupgrade/full image, not a raw `factory.ubi`. A recovery initramfs with
+  `ubiformat` is the reliable first-install path.
+- `sysupgrade` should use the OpenWrt tar (`kernel` + `rootfs` + metadata)
+  with `nand_do_upgrade`; `factory.ubi` is a separate UBI image for
+  `ubiformat`, not a tar member.
+
+**Step 3 — Plan delta**
+
+- Add the Xiaomi `platform.sh` case:
+
+```sh
+xiaomi,be18000)
+	CI_KERNPART="kernel"
+	CI_ROOTPART="rootfs"
+	CI_DATAPART="rootfs_data"
+	nand_do_upgrade "$1"
+	;;
+```
+
+- Extend `RAMFS_COPY_BIN` with the NAND tools actually used by `nand.sh`:
+  `ubiformat ubiattach ubidetach ubimkvol ubirmvol ubinfo nanddump mtd`
+  (keep the existing `fw_printenv fw_setenv head cmp sha256sum tr mktemp`).
+- Add a Xiaomi `/etc/fw_env.config` entry for the `0:APPSBLENV` mtd with
+  the live 0x40000 env size and sector size; use `find_mtd_index` or the
+  correct mtd index, and verify `fw_printenv` before any `fw_setenv`.
+  Do not write the blank `0:BOOTCONFIG` partitions.
+- `platform_copy_config`: no Xiaomi special case is required; the NAND
+  upgrade path preserves config in `rootfs_data`. Validate a
+  sysupgrade with a changed `/etc/config/network` and a clean reboot.
+- Install `factory.ubi` only with `ubiformat` on the `rootfs` mtd:
+  `ubiformat /dev/mtd$(find_mtd_index rootfs) -f factory.ubi`, then
+  `ubiattach`. Do not use `nand write` for a raw UBI image and do not
+  touch `0:ART`, `0:ETHPHYFW`, `0:APPSBL`, `0:MIBIB`, `0:CDT`, `0:QSEE`,
+  `0:DEVCFG`, or `0:APDP`.
+- Keep `REQUIRE_IMAGE_METADATA=1`; the sysupgrade tar carries the metadata.
+  The factory UBI path is a recovery/initial install, not a normal
+  sysupgrade.
+- Validation: serial/TFTP recovery initramfs, `ubiformat`, UBI attach,
+  first boot, sysupgrade with config preservation, and a recovery reinstall
+  without touching the preserved boot partitions.
