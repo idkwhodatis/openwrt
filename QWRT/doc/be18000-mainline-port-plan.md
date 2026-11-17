@@ -814,3 +814,79 @@ QSDK SSDK):
 - Port 5/6 `usxgmii` matches the QSDK13 modes and the target PCS driver's
   USXGMII support; the SFP port is deferred until the wired ports are
   stable.
+
+### Cycle 7: AQR113C NVMEM firmware and 10G port
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- OpenWrt `ipq95xx/config-default` has `CONFIG_AQUANTIA_PHY=y` (built-in).
+  Target `0350` adds `nvmem-cells = <&aqr_fw>` and
+  `nvmem-cell-names = "firmware"` to the AQR C45 PHY nodes; target `0348`
+  defines an `aqr_fw` cell on the RDP433 `0:ethphyfw` partition.
+- The live `0:ETHPHYFW` is at 0x15c0000, size 0x100000. Its first 0x28 bytes
+  are an MBN header (`image_type 0x13`, `image_size 0x60002`), followed by
+  the Xiaomi AQR v5.6.7 payload.
+- The payload is 393,218 bytes (`0x60002`); its last two bytes are
+  `0x8ac4` (big-endian), and `crc_itu_t(init 0)` over the first
+  `size - 2` bytes is also `0x8ac4`. The live 10G device binds to the
+  `Aquantia AQR113C` driver at MDIO C45 address 0 with `usxgmii`.
+
+**Step 2 — OpenWrt vs QSDK/U-Boot**
+
+- Mainline v6.18 `aquantia_firmware.c` `aqr_firmware_load()` first polls
+  `VEND1_GLOBAL_FW_ID`; if firmware is already loaded it does nothing.
+  Otherwise it reads the NVMEM cell named `firmware`, validates the AQR
+  header/CRC/version, and boots the image; if the cell is missing/invalid it
+  falls back to the `firmware-name` filesystem property.
+- U-Boot loads the same payload from `0:ETHPHYFW`; its strings include
+  `0:ETHPHYFW`, `ETHPHYFW Loading failed`, `bad magic on ETHPHYFW partition`,
+  and `aquantia_phy_reset_init_done`. The live boot already loads it, so the
+  Linux NVMEM path is a recovery path, not the normal path.
+- QSDK's `aquantia_main.c` is older and has no NVMEM loader; the live QSDK
+  relies on U-Boot. Mainline is the better path and does not need a driver
+  patch.
+
+**Step 3 — Plan delta**
+
+- Add the `0:ETHPHYFW` partition node under the NAND controller:
+
+```dts
+partition@15c0000 {
+	label = "0:ETHPHYFW";
+	reg = <0x15c0000 0x100000>;
+	read-only;
+
+	nvmem-layout {
+		compatible = "fixed-layout";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		aqr_fw: aqr-fw@28 {
+			reg = <0x28 0x60002>;
+		};
+	};
+};
+```
+
+- Add the AQR PHY node:
+
+```dts
+aqr113c: ethernet-phy@0 {
+	compatible = "ethernet-phy-ieee802.3-c45";
+	reg = <0>;
+	nvmem-cells = <&aqr_fw>;
+	nvmem-cell-names = "firmware";
+};
+```
+
+and use it on PPE port 5 with `phy-mode = "usxgmii"` and
+`pcs-handle = <&pcs1_ch0>`.
+- Use `0x28/0x60002`, not the RDP433 `0x0/0x5fc02` cell: the Xiaomi
+  partition has the 0x28-byte MBN header and a 0x60002 payload.
+- Do not install the Netgear `AQR-G4...VER1990.cld` or the Marvell
+  `VER1922` file as the primary firmware. Do not overwrite `0:ETHPHYFW`.
+- Keep `CONFIG_AQUANTIA_PHY=y`; if `kmod-phy-aquantia` is added for
+  dependency clarity, ensure it does not force the built-in driver to `m`
+  in a way that changes the NVMEM probe timing.
+- The AQR `phy_id` may read as zero via the C45 sysfs path; the driver
+  binding name and the MDIO C45 address are the reliable identifiers.
