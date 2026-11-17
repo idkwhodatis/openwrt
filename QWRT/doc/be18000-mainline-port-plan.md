@@ -1594,3 +1594,84 @@ DEVICE_PACKAGES := \
 - Add `CONFIG_IPQ_NSSCC_QCA8K=y` (already in `config-default`) and keep
   `CONFIG_AQUANTIA_PHY=y` / `CONFIG_QCA808X_PHY=y`; do not let a module
   package override them to `m`.
+
+### Cycle 20: Final consistency and evidence audit
+
+**Step 1 — OpenWrt + QWRT audit probe**
+
+- Before this section the plan had 19 `### Cycle` headings and 19 each of
+  `**Step 1 —`, `**Step 2 —`, and `**Step 3 —`; this section adds the 20th.
+- The plan had 16 Markdown fences (even), 76,921 bytes, and 1,378
+  non-empty lines. The 19 cycle commits are present in `git log` and each
+  changed only `QWRT/doc/be18000-mainline-port-plan.md`.
+- `git status --short -- target/linux/qualcommbe package/firmware
+  package/kernel/mac80211` was empty: no target source file was modified.
+  The only other worktree change is the pre-existing `.gitignore` edit,
+  which is not part of any cycle commit.
+- The cycle log covers identity, reservations, NAND/UBI, FIT, QCA8084,
+  PPE/PCS, AQR, SFP, PCIe, WSI/MLO, firmware, ART/BDF/caldata, CALDB,
+  ath12k bindings, LEDs/buttons, I2C/fan/thermal, pstore/watchdog,
+  sysupgrade/recovery, and config/packages.
+
+**Step 2 — OpenWrt vs QSDK/other tools cross-check**
+
+- Board identity: live/Qsdk13 root strings and OpenWrt `xiaomi,be18000`
+  agree; `config@al02-c4` is the live FIT config.
+- NAND/UBI: the live 28-entry MIBIB table and the target `Device/UbiFit`
+  shape agree; the factory image must be `ubiformat`-ed, not `nand write`-ed.
+- FIT: the live FIT root has no `append-bootargs`; OpenWrt `mkits.sh` does
+  not add it; the QSDK `chosen/bootargs-append` is not consumed by mainline.
+  This remains a required Phase 0 change.
+- QCA8084: the upstream `qcom,qca8084-nsscc` provider exists and the target
+  enables it; the QCA8084 PHY patches are out-of-tree. The NSSCC MDIO
+  address/reference clocks/reset wiring and 10G-QXGMII link are the open
+  hardware gate.
+- AQR113C: mainline NVMEM support matches the live `0x28/0x60002` payload
+  and CRC; this risk is resolved.
+- WSI/MLO: the sbe1v1k ring yields 2/0/1 with the 5G controller; MLO stays
+  opt-in.
+- QCN9224/QCN9274: mainline uses `firmware-2.bin` IEs; the QSDK raw
+  `amss.bin`/`m3.bin` are not drop-in. Official QCN9274 firmware is first.
+- Calibration: high-band ART slices are blank; live BDFs/board-2 are the
+  working profile; QSDK13 `ftm.conf` 1/4/2 is not the live controller order.
+- Coldboot CALDB: mainline has a DMA CALDB allocation path but no fixed
+  QSDK region/INI; whether the firmware requests CALDB is unproven.
+- Board I/O/packages: LED/button/I2C/fan/thermal nodes are extracted; the
+  package list is now explicit.
+
+**Step 3 — Final audit**
+
+| Cycle | Topic | Commit | Status |
+|---:|---|---|---|
+| 1 | Board identity and naming | `80e5ac903b` | done |
+| 2 | Reserved memory, caldb, MLO | `9c3992e31a` | done |
+| 3 | NAND, MIBIB, UBI | `534806e368` | done |
+| 4 | FIT and rootfs bootargs | `023ee77898` | done |
+| 5 | QCA8084 and NSSCC | `7da574e3c1` | done |
+| 6 | PPE/PCS/MAC mapping | `abf3db7c87` | done |
+| 7 | AQR113C NVMEM | `e5c00b35b1` | done |
+| 8 | SFP+ port 6 | `93be3b9e4c` | done |
+| 9 | PCIe/PERST/domains | `6bbe2489b3` | done |
+| 10 | WSI and MLO | `2b0a43d055` | done |
+| 11 | QCN9224/QCN9274 firmware | `6e4c64a183` | done |
+| 12 | ART/BDF/caldata | `befa18ce66` | done |
+| 13 | Coldboot CALDB | `ab3704a48d` | done |
+| 14 | ath12k DT binding contract | `d2f29d4716` | done |
+| 15 | LEDs/buttons/GPIO | `6d129d8aec` | done |
+| 16 | I2C/fan/thermal | `fbefe23108` | done |
+| 17 | Watchdog/pstore/crash | `c995716a1d` | done |
+| 18 | Sysupgrade/recovery | `8096b74e68` | done |
+| 19 | Config/packages/image | `566f3e7a38` | done |
+| 20 | Final consistency audit | this audit commit | done |
+
+- The 20-cycle objective is complete as an **offline research/edit/commit**
+  pass. Hardware validation is still blocked: no live BE18000 access, no
+  serial recovery session, and no flash.
+- The remaining hardware gates are explicit: QCA8084 NSSCC/2.5G wiring,
+  5G/6G coldboot calibration, QCN9224 firmware compatibility, SFP EEPROM
+  behavior, and 6G/MLO recovery. Do not mark those as implemented until
+  tested on the unit.
+- The plan is now 20 cycles deep and each cycle has Step 1/Step 2/Step 3
+  evidence; the commits are the audit trail. The next implementation action
+  remains Phase 0: device definition, DTS skeleton, FIT `append-bootargs`,
+  board-2 local package, package/config list, and an offline image build.
