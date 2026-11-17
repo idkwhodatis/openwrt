@@ -497,3 +497,79 @@ granular evidence and corrections.
   integrated-WiFi caldb, not the QCN9224 caldb.
 - Treat the 18 MiB `mlo_mem_size` as a QMI/MLO reservation inside the 50 MiB
   region; the exact offset is a validation item, not a fixed DT value yet.
+
+### Cycle 3: NAND, MIBIB, UBI geometry, and volumes
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- OpenWrt `Device/UbiFit` is defined at
+  `target/linux/qualcommbe/image/Makefile:33-37`: `KERNEL_IN_UBI := 1`,
+  `IMAGES += factory.ubi`, `IMAGE/factory.ubi := append-ubi`. No current
+  device uses it.
+- `scripts/ubinize-image.sh` emits a `kernel` volume, a `rootfs` volume, and
+  a `rootfs_data` volume with `vol_flags=autoresize`; the kernel volume is
+  only created when `--kernel` is passed (i.e. `KERNEL_IN_UBI=1`).
+- OpenWrt config has `CONFIG_MTD_NAND_QCOM=y`, `CONFIG_MTD_RAW_NAND=y`,
+  `CONFIG_MTD_UBI=y`, `CONFIG_MTD_UBI_BLOCK=y`, `CONFIG_UBIFS_FS=y`,
+  `CONFIG_UBIFS_FS_ADVANCED_COMPR=y`.
+- The live `mibib.bin` (28 entries, magic `0x55ee73aa`/`0xe35ebddb`,
+  version 4, entry size 28) and the live DT partition nodes agree exactly.
+  The live UBI has 1,520 LEBs of 126,976 bytes: `kernel` 44 LEB,
+  `rootfs` 407 LEB, `rootfs_data` 1,025 LEB. NAND is QPIC, ECC 4/512,
+  8-bit, with `qcom,training_offset = <0x16c0000>`.
+
+**Step 2 — OpenWrt vs QSDK13/U-Boot**
+
+- QSDK13 does not carry a separate NAND partition table in
+  `be18000-board.dts`; it relies on the bootloader/MIBIB. The live DT and
+  `mibib.bin` are therefore the only authoritative partition source.
+- U-Boot `bootipq` reads the FIT from the UBI `kernel` volume inside the
+  `rootfs` mtd partition (`ubi part fs && ubi read ... kernel`). The live
+  U-Boot strings confirm `ubi part fs` and `ubi read 0x%x kernel`.
+- The `rootfs` mtd partition is 190 MiB but the live rootfs UBI volume is
+  49.2 MiB; sysupgrade removes/recreates the volumes and resizes them, so
+  the factory image must not assume the live 49.2 MiB volume size.
+
+**Step 3 — Plan delta**
+
+- Use exactly this live MIBIB table (offset/size):
+
+| MTD | Offset | Size |
+|---|---:|---:|
+| `0:SBL1` | 0x0 | 0x180000 |
+| `0:SBL1_1` | 0x180000 | 0x180000 |
+| `0:MIBIB` | 0x300000 | 0x100000 |
+| `0:BOOTCONFIG` | 0x400000 | 0x80000 |
+| `0:BOOTCONFIG1` | 0x480000 | 0x80000 |
+| `0:QSEE` | 0x500000 | 0x380000 |
+| `0:QSEE_1` | 0x880000 | 0x380000 |
+| `0:DEVCFG` | 0xc00000 | 0x80000 |
+| `0:DEVCFG_1` | 0xc80000 | 0x80000 |
+| `0:APDP` | 0xd00000 | 0x80000 |
+| `0:APDP_1` | 0xd80000 | 0x80000 |
+| `0:TME` | 0xe00000 | 0x80000 |
+| `0:TME_1` | 0xe80000 | 0x80000 |
+| `0:RPM` | 0xf00000 | 0x80000 |
+| `0:RPM_1` | 0xf80000 | 0x80000 |
+| `0:CDT` | 0x1000000 | 0x80000 |
+| `0:CDT_1` | 0x1080000 | 0x80000 |
+| `0:APPSBLENV` | 0x1100000 | 0x80000 |
+| `0:APPSBL` | 0x1180000 | 0x180000 |
+| `0:APPSBL_1` | 0x1300000 | 0x180000 |
+| `0:ART` | 0x1480000 | 0x140000 |
+| `0:ETHPHYFW` | 0x15c0000 | 0x100000 |
+| `0:TRAINING` | 0x16c0000 | 0x80000 |
+| `0:LICENSE` | 0x1740000 | 0x40000 |
+| `rootfs` | 0x1780000 | 0xbe00000 |
+| `bdata` | 0xd580000 | 0x40000 |
+| `crash` | 0xd5c0000 | 0x40000 |
+| `crash_syslog` | 0xd600000 | 0x40000 |
+
+- Use `BLOCKSIZE=0x20000`, `PAGESIZE=2048`, `SUBPAGESIZE=2048`,
+  `VID_HDR_OFFSET=2048`, `IMAGE_SIZE=0xbe00000`, `KERNEL_IN_UBI=1`; the
+  factory image must contain `kernel`, `rootfs`, `rootfs_data`.
+- Add `platform.sh` Xiaomi case with `CI_KERNPART="kernel"`,
+  `CI_ROOTPART="rootfs"`, `CI_DATAPART="rootfs_data"`, `nand_do_upgrade`.
+- Do not copy the RDP433 partition patch `0348`; the Xiaomi MIBIB table is
+  different. Do not write `0:SBL1`, `0:MIBIB`, `0:APPSBL`, `0:CDT`,
+  `0:QSEE`, `0:DEVCFG`, `0:APDP`, `0:ART`, or `0:ETHPHYFW`.
