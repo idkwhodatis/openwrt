@@ -1333,3 +1333,60 @@ wifi@0 {
   button is `KEY_RESTART`; the mesh key preserves the observed 0x109 code.
 - Add `led_sfp_green` at GPIO62 even though SFP is deferred; it is a board
   LED and can be used by `netdev` later.
+
+### Cycle 16: I2C, fan, hwmon, NFC, and thermal
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- OpenWrt has `kmod-i2c-core`, `kmod-hwmon-pwmfan`,
+  `kmod-hwmon-emc2305`, `kmod-hwmon-lm63`, and `kmod-leds-pwm`.
+  `config-6.18` already has `CONFIG_I2C=y`, `CONFIG_I2C_QUP=y`,
+  `CONFIG_PWM=y`, `CONFIG_PWM_IPQ=y`, `CONFIG_HWMON=y`,
+  `CONFIG_THERMAL=y`, and `CONFIG_THERMAL_OF=y`.
+- The live I2C bus at `i2c@78b6000` has `nfc@54` with
+  `compatible = "miwifi,nfc"`. The live bus at `i2c@78b8000` has
+  `lm63@4C` (`national,lm63`) and `emc2301@2f` (`smsc,emc2301`) with a
+  `pwm-fan@0` child (`pwm-output-mode = <1>`). `i2c@78b7000` is disabled;
+  `i2c@78b9000`/`i2c@78bA000` are other board buses.
+- The live thermal sensor is `thermal-sensor@4a9000`; the QSDK13/Live
+  thermal-zones use `thermal-sensors = <&tsens N>` for N=3..15. The
+  mainline SoC DTSI already has the TSENS node and zones.
+- QSDK13 has the same `lm63@4C`, `emc2301@2f`, `pwm-fan@0`, and NFC
+  addresses; the NFC `miwifi,nfc` is a vendor driver, not in the target.
+
+**Step 2 — OpenWrt vs QSDK13**
+
+- The fan is an EMC2301 at I2C 0x2f with a PWM fan child; the LM63 at
+  0x4c is the temperature monitor. The mainline EMC2305 hwmon driver covers
+  EMC2301/2/3/5; use `kmod-hwmon-emc2305`, not a custom PWM fan node.
+- `kmod-hwmon-pwmfan` is still useful for a generic PWM fan only if the
+  board exposes a direct PWM fan; the live EMC2301 path does not need a
+  separate `pwm-fan` consumer.
+- The `miwifi,nfc` node has no mainline driver in the target; keep it
+  disabled/optional until a driver exists. Do not bind a generic NFC driver
+  to a Xiaomi-specific compatible.
+- The mainline TSENS/thermal zones come from the SoC DTSI; board-specific
+  trips can be added only if the live QSDK trips are materially different.
+
+**Step 3 — Plan delta**
+
+- Enable the two I2C buses used by the board (`i2c@78b6000` for NFC,
+  `i2c@78b8000` for LM63/EMC2301) with the live `blsp*_i2c` pinctrl groups
+  and `clock-frequency` (0x5cc60 for the LM63/EMC bus; 0x61a80 for the
+  others as observed).
+- Add:
+  - `nfc@54 { compatible = "miwifi,nfc"; reg = <0x54>; status = "disabled"; };`
+  - `lm63@4c { compatible = "national,lm63"; reg = <0x4c>; };`
+  - `emc2301@2f { compatible = "smsc,emc2301"; reg = <0x2f>;
+    #address-cells = <1>; #size-cells = <0>;
+    pwm-fan@0 { reg = <0>; pwm-output-mode = <1>; }; };`
+- Add `kmod-i2c-core`, `kmod-hwmon-emc2305`, `kmod-hwmon-lm63`, and
+  `kmod-leds-pwm` to `DEVICE_PACKAGES`; keep `kmod-hwmon-pwmfan` only if a
+  direct PWM fan is later confirmed.
+- Keep the mainline TSENS node/thermal-zones; do not copy the QSDK
+  `thermal-sensor@4a9000` node if the SoC DTSI already provides it. Add
+  board trips only after comparing the live QSDK trip points.
+- Do not enable the NFC node by default until a mainline-compatible driver
+  is available; the hardware address is 0x54 on the first I2C bus.
+- Verify `i2cdetect`, `sensors`, fan RPM/temperature, and that the EMC2301
+  is not reset by the MDIO/QCA8084 reset GPIO60.
