@@ -890,3 +890,55 @@ and use it on PPE port 5 with `phy-mode = "usxgmii"` and
   in a way that changes the NVMEM probe timing.
 - The AQR `phy_id` may read as zero via the C45 sysfs path; the driver
   binding name and the MDIO C45 address are the reliable identifiers.
+
+### Cycle 8: SFP+ port 6 and QCA SFP PHY
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- OpenWrt has `KernelPackage/sfp` in `package/kernel/linux/modules/netdevices.mk`
+  with `CONFIG_SFP` and `CONFIG_MDIO_I2C`, installing `sfp.ko` and
+  `mdio-i2c.ko`. The target `config-6.18` has I2C core/QUP but no
+  `CONFIG_SFP`/`CONFIG_MDIO_I2C`; `kmod-sfp` must be added.
+- `ipq9570-kiwi-dvk.dts` has the only target `sff,sfp` example:
+  `i2c-bus = <&blsp1_i2c1>`, `los-gpios = <&tlmm 46 ...>`, plus
+  `managed = "in-band-status"` on the PPE port.
+- The live SFP is **not** a direct i2c4 EEPROM. `port_phyinfo` says
+  port_id 6, PHY address `0x1e`, `phy_i2c_address = 0x1e`,
+  `phy-reset-gpio = <&tlmm 64 0>`, `media-type = "sfp"`. The live MDIO
+  device `90000.mdio:1e` binds `QCA SFP`, `phy_interface sgmii`,
+  `phy_id 0xaaaabbbb`. `ethtool -m` reports "Not supported"; no module
+  EEPROM was confirmed.
+- The SFP LED is `sfp_green` on GPIO62 with `linux,default-trigger =
+  "netdev"`; the live QSDK `dp6` is `usxgmii` at PHY `0x1e`.
+
+**Step 2 — OpenWrt vs QSDK13/SSDK**
+
+- QSDK13 keeps `dp6` at `qcom,phy-mdio-addr = <0x1e>`,
+  `phy-mode = "usxgmii"`, `media-type = "sfp"`, reset GPIO64.
+- QSDK SSDK has `IN_SFP_PHY`/`PHY_I2C_ACCESS`, `hsl_port_is_sfp()`, and
+  `SFP_PHY_CHIP`; the QCA SFP PHY is a vendor driver accessed over the
+  MDIO/I2C path. Mainline has no equivalent `QCA SFP` PHY driver in the
+  target; the generic `sff,sfp` framework expects an EEPROM/I2C cage.
+- **Derived:** port 6 can be described as `pcs2_ch0` + `usxgmii` + a
+  `phy-handle` to the `0x1e` MDIO device, but the generic `sfp` framework
+  may not bind if the cage has no EEPROM. Do not claim `ethtool -m` support
+  without a module/EEPROM test.
+
+**Step 3 — Plan delta**
+
+- Keep SFP in Phase 4, after the QCA8084 2.5G and AQR 10G ports are stable.
+- Add `kmod-sfp` to the device packages and `CONFIG_SFP`/`CONFIG_MDIO_I2C`
+  via the package; do not add a bare `CONFIG_SFP=y` without `mdio-i2c`.
+- Port 6 node: `reg = <6>`, `phy-mode = "usxgmii"`,
+  `pcs-handle = <&pcs2_ch0>`, `managed = "in-band-status"`, and a
+  `phy-handle` to an `ethernet-phy@1e` node. The `1e` node is a QCA SFP
+  device, not a generic C45 PHY; keep its reset GPIO64.
+- If a module EEPROM is present, add an `sff,sfp` node with the actual I2C
+  bus, `los-gpios`, `tx-fault-gpios`, `tx-disable-gpios`, and
+  `mod-def0-gpios`; do not reuse the i2c4 assumption. The live unit has no
+  confirmed EEPROM bus.
+- Add the `sfp_green` LED on GPIO62 with `linux,default-trigger = "netdev"`;
+  keep the SFP reset GPIO64 separate from the MDIO bus reset GPIO60.
+- Validation must include module detect, 1G and 10G links, and `dmesg` for
+  `sfp`/`mdio-i2c` probe errors. Do not promise `ethtool -m` unless the
+  module EEPROM is proven.
