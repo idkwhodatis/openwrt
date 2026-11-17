@@ -1,0 +1,448 @@
+# BE18000 mainline OpenWrt port plan
+
+Planning document, 2026-11-16. This is the implementation plan for the modified
+Xiaomi BE18000 on the mainline `qualcommbe/ipq95xx` target, not a flash
+procedure. The live router is not currently reachable from this PC (the PC is
+disconnected; `10.10.10.1` currently presents a different LuCI host), so the
+first phases are offline build/design work. Do not flash without a recovery
+path and hardware access.
+
+## 1. Objective and non-goals
+
+**Objective:** boot mainline OpenWrt on the modified BE18000 with working
+Ethernet (2.5G + 10G), 2.4/5/6 GHz WiFi, and an opt-in MLO path, while
+preserving the stock boot chain and calibration partitions.
+
+**Non-goals for the first milestone:**
+
+- Do not replace U-Boot, MIBIB, CDT, QSEE, DEVCFG or APDP.
+- Do not write blank ART/high-band calibration or zero-filled caches.
+- Do not enable MLO by default before 6G and calibration are stable.
+- Do not port the QSDK 12.2 DCS/random-channel behavior or the QSDK legacy MLO
+  reject path.
+
+## 2. Baseline and decisions
+
+### Target
+
+- `target/linux/qualcommbe`, subtarget `ipq95xx`, kernel 6.18.
+- Mainline `ath12k` from `package/kernel/mac80211` (backports 7.2).
+- `kmod-qcom-ppe`, `qca808x`, `qca8084`, `AQUANTIA_PHY`, NAND/UBI, SFP.
+- `Device/FitImage` (gzip FIT) and `Device/UbiFit` (`kernel` in UBI +
+  `rootfs`/`rootfs_data` volumes) already exist in
+  `target/linux/qualcommbe/image/Makefile`.
+
+### Closest existing reference
+
+The mainline `qcom_rdp433` (AP-AL02-C4) is the same board family as the live
+`ap-al02-c4`; use it as the starting point:
+
+- `arch/arm64/boot/dts/qcom/ipq9574-rdp433.dts` and
+  `ipq9574-rdp-common.dtsi` (kernel source).
+- Target patches `0347`-`0350` add NAND partitions, QCA8075/AQR PPE ports and
+  the AQR NVMEM cell. Do **not** copy the RDP433 partition table; the Xiaomi
+  MIBIB layout is different.
+- `ipq9570-sbe1v1k.dts` is the WSI/PCIe/LED/ART-nvmem template.
+- QSDK13 `be18000-board.dts` and the live QSDK12 DT are the Xiaomi-specific
+  authority for PCIe/WSI/board IDs/board I/O.
+
+### Key decisions
+
+| Topic | Decision |
+|---|---|
+| SoC | `ipq9574`, `compatible = "xiaomi,be18000", "qcom,ipq9574"` |
+| Image | `Device/FitImage` + `Device/UbiFit` (`factory.ubi` + sysupgrade tar) |
+| Kernel load | `0x42080000`, gzip (live working FIT); keep `config@al02-c4` |
+| Rootfs | live MIBIB `rootfs` 0x1780000 size 0xbe00000 (190 MiB) |
+| UBI | `kernel`, `rootfs`, `rootfs_data`; 0x20000 erase, 2048 page |
+| WiFi firmware | official `ath12k-firmware-qcn9274` + Xiaomi board-2 override |
+| Board-2 | live BDFs, variants `Xiaomi_BE18000_live_1/_2/_4` |
+| Calibration | coldboot CALDB, no blank ART/caches |
+| 6G | fixed PSC ch37/6135, no QSDK DCS |
+| MLO | opt-in only after 6G/WSI/calibration pass |
+| Crash capture | pstore/ramoops + watchdog sysfs |
+
+## 3. Current target gaps
+
+1. No `Device/xiaomi_be18000` and no Xiaomi DTS.
+2. `Device/UbiFit` is defined but no device uses it; NAND/UBI install path
+   needs a Xiaomi device and `platform.sh` case.
+3. `ipq95xx/base-files/etc/board.d/02_network` has no Xiaomi interface/WLAN
+   mapping.
+4. `ipq95xx/base-files/lib/upgrade/platform.sh` has no Xiaomi NAND upgrade
+   case.
+5. `ipq95xx/base-files/etc/hotplug.d/firmware/11-ath12k-caldata` only handles
+   sbe1v1k; Xiaomi must not extract blank high-band ART caldata.
+6. No Xiaomi `ipq-wifi` package/board-2 file in the tree.
+7. `ath12k` coldboot CALDB has no fixed DT region: `CALDB_MEM_REGION_TYPE`
+   sets paddr=0, although the same path also allocates a DMA chunk. Whether
+   the QCN9224 firmware requests CALDB and accepts a DMA paddr is unproven.
+8. `config-6.18` lacks pstore/ramoops/SFP/PWM/hwmon/watchdog options needed
+   for the full board.
+9. QCA8084 package/PPE mapping and AQR113C firmware/NVMEM are new for this
+   board; no Xiaomi validation.
+10. The feed `kmod-qcom-ppe` (and possibly `kmod-hwmon-*`) must be installed;
+    the target already lists `kmod-qcom-ppe` in `DEFAULT_PACKAGES`.
+11. The QCA8084 PHY support (`patches-6.18/0301`-`0312`) is out-of-tree, but
+    the upstream QCA8084 NSSCC clock/reset driver (`qcom,qca8084-nsscc`,
+    `drivers/clk/qcom/nsscc-qca8k.c`) exists and `CONFIG_IPQ_NSSCC_QCA8K=y`
+    is already set. The Xiaomi DTS does not instantiate the NSSCC node yet;
+    the exact MDIO address/reference clocks/reset GPIO, package/PCS/XPCS
+    clock-reset wiring, and QXGMII/SerDes remain the Phase 1 gate. The QSDK
+    SSDK `qca8084_phy.c` is the sequence reference.
+
+## 4. Work breakdown
+
+### Phase 0: build harness and image layout (offline)
+
+**Tasks**
+
+1. Add `Device/xiaomi_be18000` to
+   `target/linux/qualcommbe/image/ipq95xx.mk`.
+2. Add `target/linux/qualcommbe/dts/ipq9574-be18000.dts` skeleton:
+   model/compatible, `chosen`, reserved-memory, NAND partitions, UBI, board
+   I/O, PCIe nodes (initially `status = "disabled"` for WiFi), PPE/MDIO
+   (initially disabled if needed).
+3. Add the Xiaomi `ipq-wifi` package/board-2 file.
+4. Add kernel config options:
+   `CONFIG_PSTORE=y`, `CONFIG_PSTORE_RAM=y`, `CONFIG_PSTORE_CONSOLE=y`,
+   `CONFIG_SFP`/`kmod-sfp`, `CONFIG_PWM=y`, `CONFIG_HWMON=y`,
+   `CONFIG_QCOM_WDT=y`, `CONFIG_WATCHDOG_SYSFS=y`,
+   `CONFIG_SENSORS_EMC2305`/`kmod-hwmon-*`, `CONFIG_LEDS_PWM`/`kmod-leds-pwm`.
+5. Build and inspect the image only:
+   - `factory.ubi` must contain `kernel`, `rootfs`, `rootfs_data`.
+   - FIT must have `config@al02-c4`, load/entry 0x42080000, gzip, and a FIT
+     root `append-bootargs` containing `root=/dev/ubiblock0_1`. OpenWrt
+     `mkits.sh` does not add this; the live runtime DT gets it from the QSDK
+     `chosen/bootargs-append`, which mainline does not consume.
+   - board-2 must be the Xiaomi file; firmware files must be present.
+
+**Device definition draft**
+
+```make
+define Device/xiaomi_be18000
+	$(call Device/FitImage)
+	$(call Device/UbiFit)
+	DEVICE_VENDOR := Xiaomi
+	DEVICE_MODEL := BE18000
+	DEVICE_VARIANT := Pro Max
+	DEVICE_DTS := ipq9574-be18000
+	DEVICE_DTS_CONFIG := config@al02-c4
+	DEVICE_DTS_DIR := ../dts
+	KERNEL_LOADADDR := 0x42080000
+	SOC := ipq9574
+	BLOCKSIZE := 0x20000
+	PAGESIZE := 2048
+	SUBPAGESIZE := 2048
+	VID_HDR_OFFSET := 2048
+	IMAGE_SIZE := 0xbe00000
+	DEVICE_PACKAGES := ath12k-firmware-qcn9274 ipq-wifi-xiaomi_be18000 \
+		kmod-ath12k kmod-qcom-ppe kmod-sfp kmod-hwmon-pwmfan \
+		kmod-hwmon-emc2305 kmod-hwmon-lm63 kmod-leds-pwm
+endef
+TARGET_DEVICES += xiaomi_be18000
+```
+
+**Acceptance:** image builds for `ipq95xx`; `dumpimage -l` shows the FIT
+config; `ubinize`/`ubinfo` inspection shows the three volumes; no hardware
+writes.
+
+### Phase 1: boot, UBI, wired networking
+
+**Tasks**
+
+1. NAND partition table exactly matching the live MIBIB (not RDP433):
+   SBL1/MIBIB/BOOTCONFIG/QSEE/DEVCFG/APDP/TME/RPM/CDT/APPSBLENV/APPSBL/ART/
+   ETHPHYFW/TRAINING/LICENSE/rootfs/bdata/crash/crash_syslog.
+2. `0:ART` nvmem layout with `ethaddr@0` (`mac-base`) and `0:ETHPHYFW`
+   nvmem `aqr_fw@28` size 0x60002.
+3. `&qpic_nand` status okay, ECC 4/512; `Device/UbiFit`.
+4. PCIe controllers and PERST GPIOs 26/29/23, lanes 1/2/2; WiFi children
+   initially disabled.
+5. `&qcom_ppe` ports, `&mdio` QCA8084 package (PHYs 1-4, package mode 0 or the
+   mode that enumerates all four 2.5G ports), the `qcom,qca8084-nsscc`
+   clock/reset controller at the QCA8084 MDIO address (0x18 example), AQR113C
+   at MDIO 0 (C45, NVMEM firmware), SFP at 0x1e/reset GPIO64 initially
+   disabled.
+6. `02_network`: Xiaomi LAN/WAN mapping; `platform.sh`: `CI_KERNPART=kernel`,
+   `CI_ROOTPART=rootfs`, `nand_do_upgrade`.
+7. Build `factory.ubi`; install via U-Boot web recovery or TFTP only after
+   preserving ART/ETHPHYFW/APPSBL/MIBIB. Keep a serial console at 115200.
+8. Validate: boot to OpenWrt, UBI volumes, MACs, 4x2.5G, WAN, 10G AQR; LEDs,
+   buttons, fan.
+
+**Acceptance:** serial boot, rootfs on UBI, wired LAN/WAN/10G links, no
+unexpected writes to bootloader/ART/ETHPHYFW.
+
+### Phase 2: PCIe WiFi, 2.4G and 5G
+
+**Tasks**
+
+1. Enable `&pcie1`/`&pcie2` (2.4G/5G) with `wifi@0` children:
+   `compatible = "pci17cb,1109"`, `qcom,calibration-variant` live variants,
+   `qcom,wsi-controller` on 5G, WSI ring ports.
+2. Add `memory-region` for the 50 MiB QCN9224 reserved regions. The live QSDK
+   caldb is 8 MiB at offset 0x1e00000 (`0x52d00000`, `0x55f00000`,
+   `0x59100000`); decide between the QSDK `qcom,caldb-addr`/`size` fixed
+   region and the driver's existing DMA CALDB allocation after seeing the
+   firmware request.
+3. Add the Xiaomi board-2 to `ath12k/QCN9274/hw2.0/board-2.bin`; verify the
+   selected variant in dmesg.
+4. Treat the coldboot CALDB patch as conditional (Phase 2 or 3): the mainline
+   driver already allocates a DMA chunk for `CALDB_MEM_REGION_TYPE`, but it
+   sets the fixed-memory paddr to 0 and does not use the QSDK reserved
+   region. First test whether the official QCN9274 `firmware-2.bin` requests
+   CALDB; if it does not, implement the fixed `qcom,caldb-addr` path and/or a
+   QCN9224 firmware/INI path.
+5. Do **not** add high-band `cal-pci-*` extraction from blank ART; test whether
+   ath12k proceeds with coldboot CALDB. 2.4G may use the live BDF/ART path only
+   if its calibration is valid.
+6. The official QCN9274 firmware is `firmware-2.bin` (AMSS/M3 IEs), not the
+   QSDK13 QCN9224 `amss.bin`/`m3.bin`. Test the official file first; a
+   `firmware-2.bin` wrapper around the QCN9224 AMSS/M3 is a fallback, not a
+   drop-in copy.
+6. Validate 2.4G AP first, then 5G; check QMI target capability, BDF download,
+   board-2 variant, txpower, rates.
+
+**Acceptance:** 2.4G and 5G APs up; clients associate; sane txpower/rates;
+coldboot calibration succeeds; no missing-caldata probe failure.
+
+### Phase 3: 6G, calibration, WSI, MLO
+
+**Tasks**
+
+1. Enable `&pcie3` (6G, PERST GPIO23, lanes 2), 6G board-2 variant
+   `Xiaomi_BE18000_live_4`, 320 MHz on PSC ch37/6135.
+2. Keep QSDK DCS off; no random channel selection. Fixed PSC channel.
+3. Validate 6E-only client, 6G AP, txpower, rates; compare with the live
+   `6135 MHz/320 MHz` baseline.
+4. Enable WSI ring graph (2.4G -> 5G -> 6G -> 2.4G, controller on 5G); verify
+   `ath12k_core_get_wsi_index` 2/0/1 and `WSI stats` messages.
+5. Test MLO 5G+6G as opt-in only; PMF/SAE client; direct 6G probe; 6G link
+   drop/re-add; full MLD disconnect/reconnect. Do not copy QSDK 12.2 reject
+   behavior; mainline ath12k removes link peers.
+6. Add pstore/ramoops, watchdog, persistent logs; 24h stability.
+
+**Acceptance:** 6G AP + 6E client, MLO opt-in client, 6G link recovery, no DCS
+channel switch, stable 24h with pstore capture.
+
+### Phase 4: SFP, AQR, board I/O, upgrade
+
+**Tasks**
+
+1. SFP+ port 6: `sfp` node / PHY 0x1e / reset GPIO64; validate module detect
+   and 1G/10G.
+2. AQR113C firmware: U-Boot `0:ETHPHYFW` NVMEM `aqr_fw@28`; confirm the PHY
+   loads the Xiaomi payload; fallback package the extracted Xiaomi cld only if
+   the PHY resets and needs Linux reload.
+3. NFC optional node (`miwifi,nfc` at i2c0 0x54); LM63/EMC2301 fan; RGB
+   PWM3/2/1; sys/net/SFP LEDs; reset/mesh buttons.
+4. sysupgrade path: `nand_do_upgrade` with `kernel`/`rootfs`; factory.ubi
+   recovery; config preservation; verify bootloader FIT/UBI compatibility.
+5. Power/thermal stress, reboot-cause capture, final validation matrix.
+
+**Acceptance:** all ports, SFP, board I/O, sysupgrade/recovery, 24h stability.
+
+## 5. DTS outline
+
+Use `ipq9574.dtsi` and copy the RDP433/sbe1v1k nodes; do not include the
+RDP433 reference partition table.
+
+```
+/ {
+    model = "Xiaomi BE18000";
+    compatible = "xiaomi,be18000", "qcom,ipq9574";
+    aliases { serial0 = &blsp1_uart2; ... };
+    chosen { stdout-path = "serial0:115200n8"; };
+    reserved-memory {
+        /* QCN9224 50MiB regions: 0x50f00000, 0x54100000, 0x57300000 */
+        /* q6_etr_dump, tzapp, optional ramoops (verify /proc/iomem) */
+    };
+};
+
+&qpic_nand {
+    status = "okay";
+    nand-ecc-strength = <4>;
+    nand-ecc-step-size = <512>;
+    partitions { /* live MIBIB table */ };
+};
+
+&qcom_ppe { /* QCA8084 ports 1-4, AQR113C port 5, SFP port 6 */ };
+&mdio {
+    /* QCA8084 package @1: PHYs 1-4, PCS 6/7; qca8084-nsscc @0x18 clock/reset */
+    /* AQR113C @0 C45, nvmem firmware */
+    /* SFP PHY @0x1e, reset GPIO64 */
+};
+
+&pcie1 { perst-gpios = <&tlmm 26 ...>; num-lanes = <1>; wifi@0 { ... WSI ... }; };
+&pcie2 { perst-gpios = <&tlmm 29 ...>; num-lanes = <2>; wifi@0 { qcom,wsi-controller; ... }; };
+&pcie3 { perst-gpios = <&tlmm 23 ...>; num-lanes = <2>; wifi@0 { ... WSI ... }; };
+
+&tlmm { /* PCIe PERST, LEDs, buttons, SFP reset, fan/NFC pinctrl */ };
+/* gpio-keys mesh GPIO44/reset GPIO45 */
+/* leds-gpio sys 40/41, net 42/43, sfp 62 */
+/* pwm-leds red PWM3, green PWM2, blue PWM1, period 51000 */
+/* i2c0 nfc@54; i2c1 lm63@4c, emc2301@2f, pwm-fan */
+```
+
+## 6. Firmware, board-2 and calibration
+
+### Firmware
+
+- `ath12k-firmware-qcn9274` is provided by
+  `package/firmware/linux-firmware/qca_ath12k.mk` and installs
+  `ath12k/QCN9274/hw2.0/*`.
+- Test the official QCN9274 firmware with the QCN9224 endpoints. If it is
+  incompatible, fall back to the QSDK13 `amss.bin`/`m3.bin` (WBE.1.5) only
+  after checking the mainline ath12k API/board-2 compatibility.
+- Do not use QSDK `caldata_2/3/4` as calibration; they are BDF copies.
+
+### Board-2
+
+- Use `board-live-be18000.qcn9274` (live BDFs + live regdb) as the candidate.
+- Variants: `Xiaomi_BE18000_live_1` (2.4G), `_live_2` (5G), `_live_4` (6G).
+- Add a local `ipq-wifi-xiaomi_be18000` package/file; install to
+  `/lib/firmware/ath12k/QCN9274/hw2.0/board-2.bin`.
+- Verify the final image's board-2 hash; the official firmware package also
+  installs a board-2 and must not win.
+
+### Calibration
+
+- 2.4G: live BDF/ART may be usable; test.
+- 5G/6G: high-band ART blank; use coldboot CALDB:
+  - reserve the three 50 MiB QCN9224 regions;
+  - add `qcom,caldb-offset = <0x1e00000>` (8 MiB caldb inside each region);
+  - patch ath12k `CALDB_MEM_REGION_TYPE` to use the host region base + offset
+    instead of 0.
+- Do not install blank ART slices, zero cache files, or the unused 6G gain LUT.
+
+## 7. Install and recovery
+
+1. Preserve `0:ART`, `0:ETHPHYFW`, `0:APPSBL`, `0:MIBIB`, `0:CDT`,
+   `0:QSEE`, `0:DEVCFG`, `0:APDP`.
+2. Build `factory.ubi` with `kernel`/`rootfs`/`rootfs_data`; write only the
+   `rootfs` mtd partition (mtd24, 0xbe00000) via U-Boot web recovery/TFTP or
+   `ubiformat` from a recovery initramfs.
+3. Keep a serial console at 115200 and the U-Boot web recovery as the fallback.
+4. FIT: `config@al02-c4`, gzip, load/entry 0x42080000. If the stock U-Boot
+   rejects it, test 0x42200000/lzma only as a separate change.
+5. `sysupgrade`: add a Xiaomi `platform_do_upgrade` case with
+   `CI_KERNPART="kernel"`, `CI_ROOTPART="rootfs"`, `nand_do_upgrade`.
+6. UBI parameters: 0x20000 erase, 2048 page/subpage, VID header 2048; verify
+   against the stock live UBI before first write.
+
+## 8. Validation matrix
+
+| Area | Test | Pass criteria |
+|---|---|---|
+| Boot | serial, UBI attach, rootfs | OpenWrt login, 3 UBI volumes |
+| NAND | `ubiattach`/`ubinfo`, MACs | no ECC/UBI errors; MACs match live |
+| Ethernet | 4x2.5G, WAN, 10G AQR | link + DHCP + throughput |
+| SFP | module detect, 1G/10G | link, EEPROM/`ethtool -m` as applicable |
+| 2.4G | AP, client | BDF variant, txpower, association |
+| 5G | AP, client | BDF variant, 160 MHz, association |
+| 6G | AP, 6E client | ch37/6135 320 MHz, txpower, association |
+| MLO | 5G+6G client, link drop | opt-in, PMF/SAE, recovery, no stale reject |
+| Calibration | coldboot CALDB | per-radio cal success, sane txpower/rates |
+| Board I/O | LEDs, buttons, fan, NFC | all match live behavior |
+| Stability | 24h, pstore | no reboot, captured logs if any |
+| Upgrade | factory.ubi, sysupgrade | recovery path works; config preserved |
+
+## 9. Risks and mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| **QCA8084 external package NSSCC/SerDes** | **no 2.5G ports** | instantiate the upstream `qcom,qca8084-nsscc` MDIO clock/reset controller (0x18 example, reference clocks, reset GPIO60), wire the package/per-PHY/PCS/XPCS phandles, validate 10G-QXGMII; AQR/10G first |
+| QCA8084 package mode/PPE mapping | wrong port/PCS mapping | use 10G-QXGMII package mode 0, `pcs0_ch0..3`, live MDIO 1-4; test 2.5G |
+| AQR113C firmware/MBN | no 10G | use `0:ETHPHYFW` NVMEM `aqr_fw@28`/0x60002; mainline driver validates the payload; U-Boot already loads it |
+| High-band calibration | no 5G/6G | coldboot CALDB; do not use blank ART; test whether firmware requests CALDB before adding a fixed region patch |
+| QCN9224 vs QCN9274 firmware | WiFi probe fail | official QCN9274 `firmware-2.bin` first; wrap QSDK13 QCN9224 AMSS/M3 only as a fallback |
+| U-Boot FIT/UBI | no boot / no rootfs | live 0x42080000/gzip/config@al02-c4 **and** FIT `append-bootargs` for `root=/dev/ubiblock0_1`; web recovery |
+| NAND/UBI params | corrupt rootfs | verify stock UBI; back up ART/ETHPHYFW; recovery initramfs + `ubiformat` |
+| Install path | bricked rootfs | do not assume the web recovery accepts raw `factory.ubi`; use serial/TFTP recovery initramfs |
+| SFP port 6 | no SFP | defer; `sfp` node/PHY 0x1e/reset GPIO64/`pcs2_ch0` |
+| MLO/WSI | slow 6G recovery | opt-in; sbe1v1k WSI graph; fixed PSC; mainline ath12k lifecycle; test |
+| Secure boot/DPR | image rejected | verify fuse status before flashing; preserve QSEE/DEVCFG/APDP |
+
+## 10. Immediate next actions
+
+1. Read `QWRT/doc/be18000-port-risk-research.md` first; it changes the
+   QCA8084 and CALDB assumptions.
+2. Create `Device/xiaomi_be18000` and the DTS skeleton; build offline.
+3. Add the local `ipq-wifi-xiaomi_be18000` board-2 package and verify the
+   image's `board-2.bin` hash.
+4. Add the FIT `append-bootargs` handling, the config options, and the
+   conditional coldboot CALDB patch draft.
+5. Add the Xiaomi `02_network`/`platform.sh` cases.
+6. Prepare the U-Boot recovery/serial procedure and a recovery initramfs with
+   `ubiformat`; do not rely on the web recovery for a raw `factory.ubi`.
+7. Only after hardware access returns: validate AQR/10G and the QCA8084
+   package probe first, then 2.4G/5G, then 6G/MLO.
+
+## 11. References
+
+- `QWRT/doc/be18000-port-risk-research.md` (risk audit and evidence)
+- `QWRT/doc/be18000-live-probe-4.md`, `be18000-live-probe-5.md`
+- `QWRT/doc/be18000-probe-rounds.md`
+- `QWRT/doc/be18000-mlo-incident.md`
+- `QWRT/doc/be18000-qsdk-dcs-research.md`
+- `QWRT/doc/be18000-qsdk13-mlo-auth-research.md`
+- `target/linux/qualcommbe/image/ipq95xx.mk`
+- `target/linux/qualcommbe/dts/ipq9570-sbe1v1k.dts`
+- `target/linux/qualcommbe/patches-6.18/0347..0350`
+- `package/firmware/linux-firmware/qca_ath12k.mk`
+- `package/firmware/ipq-wifi/Makefile`
+
+## 12. Granular research cycles (20 cycles)
+
+This section is the cycle log for the 20-cycle research pass. Each cycle has
+three steps: (1) probe OpenWrt and QWRT, (2) probe OpenWrt against QSDK or
+other tools/binaries, (3) record the plan delta and commit the plan. The
+earlier sections remain the implementation plan; the cycle log supplies the
+granular evidence and corrections.
+
+### Cycle 1: Board identity and device naming
+
+**Step 1 — OpenWrt + QWRT probe**
+
+- OpenWrt DTS convention in this target is `model = "<vendor> <board>"` and
+  `compatible = "<vendor>,<board>", "qcom,ipq9574"`:
+  `ipq9570-sbe1v1k.dts` has `Askey SBE1V1K` / `askey,sbe1v1k`,
+  `ipq9570-kiwi-dvk.dts` has `8devices Kiwi-DVK` / `8devices,kiwi-dvk`,
+  `ipq9554-linksys-ln6001.dts` has `Linksys LN6001` /
+  `linksys,ln6001`.
+- The live QWRT root is:
+  `model = "Xiaomi Router BE18000 Pro Max (Wi-Fi 7 320Mhz)"`;
+  `compatible = "xiaomi,be18000", "qcom,ipq9574-ap-al02-c4",
+  "qcom,ipq9574-al02", "qcom,ipq9574"`.
+- The QSDK13 root is:
+  `model = "Xiaomi Router BE18000 ( Wi-Fi 7 320MHZ )"`;
+  `compatible = "xiaomi,be18000", "qcom,ipq9574-ap-al02-c4",
+  "qcom,ipq9574"`.
+
+**Step 2 — OpenWrt vs QSDK/U-Boot identity**
+
+- Live `0:APPSBLENV` has `model=RC01`, `machid=8050301`,
+  `bootcmd=bootipq`, `soc_version_major=1`, `soc_version_minor=1`,
+  `flash_type=11`. The U-Boot model is a manufacturing code, not the Linux
+  model string; do not use `RC01` for `board_name`.
+- OpenWrt `board_name` is derived from the first DTS compatible. The scripts
+  must use `xiaomi,be18000`, not the QSDK model or `RC01`.
+- `DEVICE_DTS` must be `ipq9574-be18000`, `SOC` `ipq9574`, and
+  `DEVICE_DTS_CONFIG` `config@al02-c4`; the live FIT config is
+  `config@al02-c4`, not the target default `config@1`.
+
+**Step 3 — Plan delta**
+
+- Fix the DTS root identity to:
+  `model = "Xiaomi BE18000";`
+  `compatible = "xiaomi,be18000", "qcom,ipq9574-ap-al02-c4", "qcom,ipq9574";`
+  The AP-AL02-C4 string is retained for board-family matching; the first
+  string is the OpenWrt board name.
+- Fix `DEVICE_VENDOR := Xiaomi`, `DEVICE_MODEL := BE18000`,
+  `DEVICE_VARIANT := Pro Max`, `DEVICE_DTS := ipq9574-be18000`,
+  `DEVICE_DTS_CONFIG := config@al02-c4`, `SOC := ipq9574`.
+- Use `xiaomi,be18000` in `02_network`, `platform.sh`, `11-ath12k-caldata`,
+  and any board-specific hotplug/uci-defaults case.
+- Do not use `RC01`, `machid=8050301`, or the QSDK model string as a board
+  key. They are bootloader/manufacturing identifiers only.
