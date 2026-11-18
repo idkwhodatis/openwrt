@@ -1,0 +1,121 @@
+# Xiaomi BE10000 modified 6 GHz port investigation
+
+These are read-only findings and an implementation plan, not a flash procedure.
+
+Read the reports in order; later reports refine earlier unknowns:
+
+1. [Hardware/profile comparison](be10000-hardware-comparison.md)
+2. [ART, device tree, and porting implications](be10000-porting-probe-2.md)
+3. [Calibration caches and boot handling](be10000-porting-probe-3.md)
+4. [Compared file hashes](be10000-comparison-hashes.json)
+5. [BE18000 live probe 4: AQR113C, QMI IDs, ART factory BDFs, gain LUT](be18000-live-probe-4.md)
+6. [BE18000 live probe 5: bootloader/FIT, PCIe, board I/O, CNSS debugfs](be18000-live-probe-5.md)
+7. [BE18000 probe rounds 1-29](be18000-probe-rounds.md)
+8. [BE18000 MLO incident: reboot and slow 6G recovery](be18000-mlo-incident.md)
+9. [QSDK DCS research: 6 GHz AWGN channel switch](be18000-qsdk-dcs-research.md)
+10. [QSDK13 MLO auth-path research: stale-peer recovery](be18000-qsdk13-mlo-auth-research.md)
+11. [BE18000 mainline OpenWrt port plan](be18000-mainline-port-plan.md)
+12. [BE18000 mainline port risk research](be18000-port-risk-research.md)
+13. [BE10000 vs BE18000 QWRT: 20 OpenWrt gap rounds](be10000-be18000-openwrt-gap-rounds.md)
+
+## Current conclusions
+
+- The custom radio mapping is PCI1/BDF1 (2.4G), PCI2/BDF2 (5G), PCI3/BDF4
+  (6 GHz); PCI3 currently operates at 6135 MHz/320 MHz. The live unit was later
+  moved to ch129/6595 by AWGN DCS; the port intentionally pins ch37/6135.
+- ART offsets are verified. Both high-band 184,320-byte slots are erased
+  (`0xFF`), not valid shared calibration records. The ART also contains factory
+  BDF containers at 0x1000/0x33000/0x65000; these match the original BE10000
+  profile, not the modified SKY85798 profile.
+- QWRT runs cold-boot calibration. The three `/data/vendor/wifi` cache files are
+  zero-filled placeholders, not calibration. Backports 7.2 ath12k does **not**
+  enable cold-boot calibration (`CALDB_MEM_REGION_TYPE` paddr=0); enabling it
+  with caldb reserved memory is the main path to unblock 5G/6G calibration.
+- The live 10G PHY is **Aquantia AQR113C**. `0:ETHPHYFW` is an MBN-wrapped Xiaomi
+  AQR v5.6.7 firmware image loaded by U-Boot; the 0x28/0x60002 nvmem slice is
+  valid. RTL8261N is not the live PHY.
+- The live QCN9224 QMI IDs are `chip_id 0x0`, `board_id 0xff`, matching the
+  generated board-2 entries.
+- `rxgainlutSKY_6G.bin` is **not loaded** by cnss2; the loader expects
+  `rxgainlut.b<boardid>`/`.bin`/`.b%02x`.
+- The QSDK13 image's `ftm.conf`/`caldata_3/4` are the standard 1/4/2 mapping,
+  while its DTS uses 1/2/4; the 5G/6G BDF copies are swapped relative to the
+  live controllers.
+- Live MLO is the stock QSDK `load_cnss2` default, not recent user work.
+  MLO logs show some partner-peer failures and "WSI stats support is not enabled";
+  treat it as a separate validation item.
+- The live FIT is `config@al02-c4`, gzip, load/entry **0x42080000**; the QSDK13
+  FIT uses the same config but lzma at **0x40000000**. The live U-Boot proves the
+  config name; the load-address choice is an install test.
+- The live unit has **NFC** at i2c0 0x54 (`miwifi,nfc`) and a **reset** button on
+  GPIO45 (the QSDK13 DTS says wps). The SFP+ is ESS port6/PHY 0x1e/reset GPIO64,
+  not a direct i2c4 EEPROM.
+- PCIe links are 8 GT/s x1 for PCI1/2.4G and x2 for PCI2/PCI3; endpoint BAR0 is
+  2 MiB.
+- The U-Boot contains AQR/ETHPHYFW loading, a web recovery UI, QCN9224
+  detect/fuse commands, and generic secure-boot strings. `qcn9224_version` is
+  set by `detect_qcn9224` from the TCSR SoC HW version, not an anti-rollback
+  check. Verify secure boot/anti-rollback before flashing; do not touch
+  QSEE/DEVCFG/APDP.
+- The installer has identified SKY85798 and RF/FEM-filter changes. Exact suffix,
+  filters, component count and wiring remain unverified; see the latest report.
+- No router changes or port implementation have been performed during these
+  probes.
+
+The initial report used previously extracted files. Probe 2 independently
+compared the supplied factory image's embedded DTB against the live DTB, but did
+not independently re-extract every supplied rootfs file.
+
+## Installer update - 2026-11-16
+
+[SKY85798 confirmation and QSDK13 comparison](be18000-sky85798-qsdk13.md)
+supersedes the earlier unknown-FEM status and adds verified gain-table and
+packaged-calibration comparisons.
+
+[BE18000 live probe 4](be18000-live-probe-4.md) adds the live AQR113C/MBN
+identification, QMI IDs, ART factory BDFs, gain-LUT non-use, and the QSDK13
+caldata mapping inconsistency. Raw read-only dumps are in
+`QWRT/extracted/live-be18000/`.
+
+[BE18000 live probe 5](be18000-live-probe-5.md) adds the FIT/load-address
+comparison, U-Boot/secure-boot strings, PCIe widths/BARs, NFC/reset-button/SFP
+corrections, and CNSS debugfs/QMI/MLO caveats.
+
+[BE18000 probe rounds 1-29](be18000-probe-rounds.md) is the consolidated round
+log. Rounds 1-11 are live read-only probes; rounds 12-21 are offline analysis
+after `10.10.10.1` became unreachable; rounds 22-29 are the MLO/reboot/DCS/
+QSDK-source investigation after the router came back.
+
+[BE18000 MLO incident](be18000-mlo-incident.md) explains the unclean reboot
+(no persistent crash log), the QSDK stale-MLD-peer auth rejects, the direct-6G
+probe MLDID drops, the 6G AWGN DCS channel switch from ch37 to non-PSC ch129,
+and the mainline port fixes (WSI ring graph, MLO opt-in, mainline ML station
+lifecycle, fixed PSC 6G channel, coldboot calibration, pstore/reset-reason
+capture).
+
+[QSDK DCS research](be18000-qsdk-dcs-research.md) adds the QSDK 12.5 source
+analysis (DCS type mask, AWGN/AFC path, PCL/bandwidth-reduction algorithm) and
+the key QSDK13 finding: the BE18000 image explicitly disables DCS in
+`bootcount`, the generated wireless config, and `performance_configs.sh`, while
+the live QSDK 12.2 image leaves it enabled.
+
+[QSDK13 MLO auth-path research](be18000-qsdk13-mlo-auth-research.md) adds the
+QSDK13 `umac.ko` finding: PMF/SAE stale peers are forwarded to hostapd (with an
+active-MLO peer delete path) instead of rejected; the live QSDK 12.2 image only
+has the reject path.
+
+[BE18000 mainline OpenWrt port plan](be18000-mainline-port-plan.md) is the
+implementation plan: device definition, NAND/UBI `Device/UbiFit`, live MIBIB
+partitions, QCA8084/AQR113C wired networking, PCIe/WSI WiFi, board-2 and
+coldboot CALDB, fixed-PSC 6G, opt-in MLO, pstore/ramoops, install/recovery and
+validation matrix.
+
+[BE18000 mainline port risk research](be18000-port-risk-research.md) audits the
+plan's top risks. The two hardest items are the QCA8084 PHY/NSSCC/SerDes
+wiring (the upstream `qcom,qca8084-nsscc` clock/reset driver exists and is
+enabled, but the Xiaomi DTS does not instantiate it yet) and 5G/6G coldboot
+calibration (the mainline driver allocates a CALDB chunk but does not use the
+QSDK fixed region or coldboot INI). It also adds the missing FIT
+`append-bootargs` for `root=/dev/ubiblock0_1`, the QCN9224-vs-QCN9274
+`firmware-2.bin` format gap, and the install/recovery caveat for a raw
+`factory.ubi`.
