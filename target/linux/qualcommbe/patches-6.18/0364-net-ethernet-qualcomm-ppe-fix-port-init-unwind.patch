@@ -1,0 +1,200 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 22 Nov 2026 00:00:00 -0500
+Subject: [PATCH] net: ethernet: qualcomm: ppe: fix port initialization unwind
+
+A failed EDMA port setup decrements the shared port index to -1 while
+unregistering earlier ports, then reuses that index to release clocks.
+The clock loop therefore walks before the allocated port array. Other
+per-port errors skip registered ports or leave the current port's clocks
+and reset controls acquired.
+
+Track completed clock initialization and registered netdevices separately.
+Route every per-port failure through one unwind path, release only the
+resources acquired so far, and preserve the original error, including
+-EPROBE_DEFER. Keep the current iterator node reference until cleanup is
+complete, then release it together with the ports node reference.
+
+Unregister each netdevice before tearing down the resources used by
+ndo_stop, and disconnect its PHY before freeing the netdevice. Delete
+already-disabled NAPI instances without calling napi_disable() again:
+TX NAPI has never been enabled on setup failure, or was disabled by
+ndo_stop; RX NAPI is explicitly disabled by each of its deletion callers.
+Disabling either instance a second time can hang the probe error path.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ drivers/net/ethernet/qualcomm/ppe/edma_cfg_rx.c | 3 +--
+ drivers/net/ethernet/qualcomm/ppe/edma_cfg_tx.c | 5 ++---
+ drivers/net/ethernet/qualcomm/ppe/edma_port.c | 7 ++++---
+ drivers/net/ethernet/qualcomm/ppe/ppe_port.c | 54 ++++++++++++++++++++++++++++--------------------------
+ 4 files changed, 35 insertions(+), 34 deletions(-)
+
+--- a/drivers/net/ethernet/qualcomm/ppe/edma_cfg_rx.c
++++ b/drivers/net/ethernet/qualcomm/ppe/edma_cfg_rx.c
+@@ -932,7 +932,7 @@
+ /**
+  * edma_cfg_rx_napi_delete - Delete Rx NAPI
+  *
+- * Delete RX NAPI
++ * Delete RX NAPI. The caller must have disabled NAPI first.
+  */
+ void edma_cfg_rx_napi_delete(void)
+ {
+@@ -948,7 +948,6 @@
+ 		if (!rxdesc_ring->napi_added)
+ 			continue;
+ 
+-		napi_disable(&rxdesc_ring->napi);
+ 		netif_napi_del(&rxdesc_ring->napi);
+ 		rxdesc_ring->napi_added = false;
+ 	}
+--- a/drivers/net/ethernet/qualcomm/ppe/edma_cfg_tx.c
++++ b/drivers/net/ethernet/qualcomm/ppe/edma_cfg_tx.c
+@@ -619,21 +619,20 @@
+  * edma_cfg_tx_napi_delete - Delete Tx NAPI.
+  * @port_id: Port ID.
+  *
+- * Delete Tx NAPI.
++ * Delete Tx NAPI. The caller must have disabled NAPI, or never enabled it.
+  */
+ void edma_cfg_tx_napi_delete(u32 port_id)
+ {
+ 	struct edma_txcmpl_ring *txcmpl_ring;
+ 	u32 i, ring_idx;
+ 
+-	/* Disabling Tx napi for a interface with each queue. */
++	/* Delete the disabled Tx NAPI instances for this interface. */
+ 	for_each_possible_cpu(i) {
+ 		ring_idx = ((port_id - 1) * num_possible_cpus()) + i;
+ 		txcmpl_ring = &edma_ctx->txcmpl_rings[ring_idx];
+ 		if (!txcmpl_ring->napi_added)
+ 			continue;
+ 
+-		napi_disable(&txcmpl_ring->napi);
+ 		netif_napi_del(&txcmpl_ring->napi);
+ 		txcmpl_ring->napi_added = false;
+ 	}
+--- a/drivers/net/ethernet/qualcomm/ppe/edma_port.c
++++ b/drivers/net/ethernet/qualcomm/ppe/edma_port.c
+@@ -333,12 +333,13 @@
+ 	int port_id = port->port_id;
+ 	struct net_device *netdev = edma_ctx->netdev_arr[port_id - 1];
+ 
+-	edma_port_deconfigure(netdev);
+-	edma_port_stats_free(netdev);
++	/* ndo_stop and PHY detach still need the netdevice and its resources. */
+ 	unregister_netdev(netdev);
+-	free_netdev(netdev);
+ 	ppe_port_phylink_destroy(port);
++	edma_port_deconfigure(netdev);
+ 	edma_ctx->netdev_arr[port_id - 1] = NULL;
++	edma_port_stats_free(netdev);
++	free_netdev(netdev);
+ }
+ 
+ /**
+--- a/drivers/net/ethernet/qualcomm/ppe/ppe_port.c
++++ b/drivers/net/ethernet/qualcomm/ppe/ppe_port.c
+@@ -1338,10 +1338,12 @@
+  */
+ int ppe_port_mac_init(struct ppe_device *ppe_dev)
+ {
++	unsigned int clocks_initialized = 0, ports_registered = 0;
+ 	struct device_node *ports_node, *port_node;
+ 	struct ppe_ports *ppe_ports;
+-	int port, num, ret, i = 0;
++	struct ppe_port *ppe_port;
+ 	phy_interface_t phy_mode;
++	int port, num, ret;
+ 
+ 	ports_node = of_get_child_by_name(ppe_dev->dev->of_node,
+ 					  "ethernet-ports");
+@@ -1367,60 +1369,60 @@
+ 		ret = of_property_read_u32(port_node, "reg", &port);
+ 		if (ret) {
+ 			dev_err(ppe_dev->dev, "Failed to get port id\n");
+-			goto err_port_node;
++			goto err_ports;
+ 		}
+ 
+ 		ret = of_get_phy_mode(port_node, &phy_mode);
+ 		if (ret) {
+ 			dev_err(ppe_dev->dev, "Failed to get phy mode\n");
+-			goto err_port_node;
++			goto err_ports;
+ 		}
+ 
+-		ppe_ports->port[i].ppe_dev = ppe_dev;
+-		ppe_ports->port[i].port_id = port;
+-		ppe_ports->port[i].np = port_node;
+-		ppe_ports->port[i].interface = phy_mode;
+-		ppe_ports->port[i].mac_type = PPE_MAC_TYPE_GMAC;
++		ppe_port = &ppe_ports->port[ports_registered];
++		ppe_port->ppe_dev = ppe_dev;
++		ppe_port->port_id = port;
++		ppe_port->np = port_node;
++		ppe_port->interface = phy_mode;
++		ppe_port->mac_type = PPE_MAC_TYPE_GMAC;
+ 
+-		ret = ppe_port_clock_init(&ppe_ports->port[i]);
++		ret = ppe_port_clock_init(ppe_port);
+ 		if (ret) {
+ 			dev_err(ppe_dev->dev, "Failed to initialize port clocks\n");
+-			goto err_port_clk;
++			goto err_ports;
+ 		}
++		clocks_initialized++;
+ 
+-		ret = ppe_port_mac_hw_init(&ppe_ports->port[i]);
++		ret = ppe_port_mac_hw_init(ppe_port);
+ 		if (ret) {
+ 			dev_err(ppe_dev->dev, "Failed to initialize MAC hardware\n");
+-			goto err_port_node;
++			goto err_ports;
+ 		}
+ 
+-		ret = edma_port_setup(&ppe_ports->port[i]);
++		ret = edma_port_setup(ppe_port);
+ 		if (ret) {
+ 			dev_err(ppe_dev->dev, "QCOM EDMA port setup failed\n");
+-			i--;
+-			goto err_port_setup;
++			goto err_ports;
+ 		}
+ 
+-		i++;
++		ports_registered++;
+ 	}
+ 
+ 	of_node_put(ports_node);
+ 	return 0;
+ 
+-err_port_setup:
+-	/* Destroy edma ports created till now */
+-	while (i >= 0) {
+-		edma_port_destroy(&ppe_ports->port[i]);
+-		i--;
++err_ports:
++	while (ports_registered) {
++		ports_registered--;
++		edma_port_destroy(&ppe_ports->port[ports_registered]);
+ 	}
+ 
+-err_port_clk:
+-	while (i) {
+-		i--;
+-		ppe_port_clock_deinit(&ppe_ports->port[i]);
++	/* The failed port may have clocks but no registered netdevice. */
++	while (clocks_initialized) {
++		clocks_initialized--;
++		ppe_port_clock_deinit(&ppe_ports->port[clocks_initialized]);
+ 	}
++	ppe_ports->num = 0;
+ 
+-err_port_node:
+ 	of_node_put(port_node);
+ err_ports_node:
+ 	of_node_put(ports_node);
+-- 
+2.43.0
