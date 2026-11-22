@@ -98,7 +98,9 @@ rootfs_backup_bytes=$(wc -c < /tmp/rootfs-ubi.bin)
 [ "$rootfs_backup_bytes" -eq $((0x$rootfs_size)) ] || {
     echo "truncated rootfs UBI backup: $rootfs_backup_bytes bytes, expected $((0x$rootfs_size))";
     exit 1; }
-sha256sum /tmp/mtd*.bin /tmp/rootfs-ubi.bin
+cd /tmp
+sha256sum mtd*.bin rootfs-ubi.bin > backup.sha256
+cat backup.sha256
 ```
 
 If `nanddump` is not in the initramfs, substitute
@@ -128,15 +130,26 @@ ncat -l -p 9000 > be18000-backup.tar
 # Router:
 cd /tmp
 tar -cf - mtd2.bin mtd17.bin mtd18.bin mtd19.bin mtd20.bin mtd21.bin \
-    mtd25.bin rootfs-ubi.bin | nc 192.168.31.100 9000
+    mtd25.bin rootfs-ubi.bin backup.sha256 | nc 192.168.31.100 9000
 ```
 
-On the PC, verify the archive names and keep its hash with the backups:
+`/tmp` is RAM and does not survive a reboot. The extracted PC copy is the
+rollback source. Verify every surviving file before continuing:
 
 ```sh
-tar -tf be18000-backup.tar
-sha256sum be18000-backup.tar
+mkdir -p be18000-backup
+tar -xf be18000-backup.tar -C be18000-backup
+cd be18000-backup
+sha256sum -c backup.sha256
+rootfs_bytes=$(wc -c < rootfs-ubi.bin)
+[ "$rootfs_bytes" -eq 199229440 ] || {
+    echo "rollback copy truncated: $rootfs_bytes bytes, expected 199229440";
+    exit 1; }
+sha256sum rootfs-ubi.bin | tee rootfs-ubi.sha256
 ```
+
+Do not proceed until `sha256sum -c backup.sha256` passes and
+`rootfs-ubi.bin` is exactly 190 MiB (`0xbe00000`).
 
 Checks: `mtd18` is 1,572,864 bytes and its first 549,912 bytes must hash to
 `a82b54764a7a3aad49651d702a85ccd645dc51369b1492f2697cd1fb98c1b1e7`.
@@ -145,11 +158,19 @@ Do not continue until every file is off the router and hashed.
 
 ## 4. Step 1 — first OpenWrt write
 
-Still in the initramfs, fetch `factory.ubi` (17,039,360 bytes) to `/tmp`:
+Still in the initramfs, pull `factory.ubi` (17,039,360 bytes) from the PC
+using the router as the client, as in the backup transfer:
 
 ```sh
-# PC push, or wget from a local HTTP server
-nc -l -p 9001 > /tmp/factory.ubi
+# PC first:
+ncat -l -p 9001 < openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi
+
+# Router:
+nc 192.168.31.100 9001 > /tmp/factory.ubi
+factory_bytes=$(wc -c < /tmp/factory.ubi)
+[ "$factory_bytes" -eq 17039360 ] || {
+    echo "truncated factory.ubi: $factory_bytes bytes, expected 17039360";
+    exit 1; }
 sha256sum /tmp/factory.ubi   # must be 83947e3d5da442906c6033ea1f34fa02eb3467867d56b71ccef2386915a7e403
 ```
 
@@ -195,6 +216,8 @@ check_mtd "crash_syslog" 27 40000
 [ -z "$(mtd_size overlay)" ] || { echo "v2 layout: overlay present"; exit 1; }
 
 rootfs_size=$(mtd_size rootfs)
+# /tmp is RAM. If it was lost by a reboot, copy the verified
+# rootfs-ubi.bin back from the PC backup before continuing.
 [ -f /tmp/rootfs-ubi.bin ] || { echo "rollback backup missing"; exit 1; }
 backup_bytes=$(wc -c < /tmp/rootfs-ubi.bin)
 [ "$backup_bytes" -eq $((0x$rootfs_size)) ] || {
@@ -251,11 +274,9 @@ Reboot. Expected: U-Boot `bootipq` reads the `kernel` volume, the kernel
 cmdline ends with `root=/dev/ubiblock0_1`, and OpenWrt reaches the login
 prompt. If it does not, go to section 6.
 
-After the first successful boot, use the normal image:
-
-```sh
-sysupgrade -n openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin
-```
+Do **not** run sysupgrade from the first boot. Keep this first successful
+install running, reboot it once more, and complete section 5. Only after it
+has booted successfully at least twice should you consider an update.
 
 ## 5. Step 2 — verify, then keep the U-Boot
 
@@ -269,6 +290,12 @@ Expected: `bootcmd=bootipq`; the U-Boot version is still
 `U-Boot 2016.01 (Jan 01 2024 ...)`. **Do not reflash the bootloader as part
 of the OpenWrt install.** It is already the exact image in `QWRT/UBoot` and
 there is no rebuild path in this tree.
+
+After the second successful boot and these checks, later updates can use:
+
+```sh
+sysupgrade -n openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin
+```
 
 ## 6. Recovery paths
 

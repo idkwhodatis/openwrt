@@ -56,6 +56,15 @@ def main():
     assert "ip addr add 192.168.31.1/24" in text
     assert "ping -c 1 192.168.31.100" in text
     assert "be18000-backup.tar" in text
+    assert "backup.sha256" in text
+    assert "sha256sum -c backup.sha256" in text
+    assert "expected 199229440" in text
+    assert "ncat -l -p 9001 <" in text
+    assert "nc 192.168.31.100 9001 > /tmp/factory.ubi" in text
+    assert "expected 17039360" in text
+    assert "Do **not** run sysupgrade from the first boot" in text
+    assert "booted successfully at least twice" in text
+    assert "nc -l -p 9001 > /tmp/factory.ubi" not in text
     assert "192.168.1.100/24" in text
     assert "dd if=/dev/mtd2 bs=256k count=1" in text
     assert "e482188b9d950fd6fa8375df002f143600911a4472e186c9172d072e0fd034a0" in text
