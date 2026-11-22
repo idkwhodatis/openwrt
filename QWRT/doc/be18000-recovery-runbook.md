@@ -80,7 +80,9 @@ cat /proc/mtd
 rootfs_mtd=$(awk '$4 ~ /rootfs/ { gsub(/[^0-9]/, "", $1); print $1 }' /proc/mtd)
 [ -n "$rootfs_mtd" ] || { echo "rootfs MTD not found"; exit 1; }
 rootfs_dev=/dev/mtd${rootfs_mtd}
-echo "rootfs MTD: $rootfs_dev"
+rootfs_size=$(awk '$4 ~ /rootfs/ { print $2; exit }' /proc/mtd)
+[ -n "$rootfs_size" ] || { echo "rootfs MTD size not found"; exit 1; }
+echo "rootfs MTD: $rootfs_dev (0x$rootfs_size)"
 
 nanddump -f /tmp/mtd2.bin  /dev/mtd2      # MIBIB
 nanddump -f /tmp/mtd17.bin /dev/mtd17     # APPSBLENV
@@ -88,21 +90,52 @@ nanddump -f /tmp/mtd18.bin /dev/mtd18     # APPSBL
 nanddump -f /tmp/mtd19.bin /dev/mtd19     # APPSBL_1  (never dumped before)
 nanddump -f /tmp/mtd20.bin /dev/mtd20     # ART
 nanddump -f /tmp/mtd21.bin /dev/mtd21     # ETHPHYFW
-dd if="$rootfs_dev" of=/tmp/rootfs-ubi.bin bs=128k   # whole UBI area
+dd if="$rootfs_dev" of=/tmp/rootfs-ubi.bin bs=128k || {
+    echo "rootfs UBI backup read failed"; exit 1; }
 dd if=/dev/mtd25 of=/tmp/mtd25.bin bs=64k            # bdata
+
+rootfs_backup_bytes=$(wc -c < /tmp/rootfs-ubi.bin)
+[ "$rootfs_backup_bytes" -eq $((0x$rootfs_size)) ] || {
+    echo "truncated rootfs UBI backup: $rootfs_backup_bytes bytes, expected $((0x$rootfs_size))";
+    exit 1; }
 sha256sum /tmp/mtd*.bin /tmp/rootfs-ubi.bin
 ```
 
 If `nanddump` is not in the initramfs, substitute
 `dd if=/dev/mtdN of=/tmp/mtdN.bin bs=128k` (data only; no OOB).
 
-Copy the files off the router (either works; `nc` is the fallback when the
-initramfs has no ssh):
+The `ipaddr`/`serverip` values from U-Boot do not carry into Linux. Configure
+the initramfs LAN interface first, then transfer all backups, including the
+190 MiB `rootfs-ubi.bin`:
 
 ```sh
-# router -> PC push
-nc 192.168.31.100 9000 < /tmp/mtd18.bin
-# PC side: ncat -l -p 9000 > mtd18.bin
+ip addr show
+# Use the LAN interface shown above (normally lan1 or br-lan).
+lan_if=lan1
+ip link set "$lan_if" up
+ip addr add 192.168.31.1/24 dev "$lan_if" 2>/dev/null || true
+ip addr show dev "$lan_if"
+ping -c 1 192.168.31.100
+```
+
+If the PC does not answer, correct the interface name/address before
+continuing. Then start the listener on the PC **before** the router command:
+
+```sh
+# PC first:
+ncat -l -p 9000 > be18000-backup.tar
+
+# Router:
+cd /tmp
+tar -cf - mtd2.bin mtd17.bin mtd18.bin mtd19.bin mtd20.bin mtd21.bin \
+    mtd25.bin rootfs-ubi.bin | nc 192.168.31.100 9000
+```
+
+On the PC, verify the archive names and keep its hash with the backups:
+
+```sh
+tar -tf be18000-backup.tar
+sha256sum be18000-backup.tar
 ```
 
 Checks: `mtd18` is 1,572,864 bytes and its first 549,912 bytes must hash to
@@ -128,6 +161,45 @@ rootfs_mtd=$(awk '$4 ~ /rootfs/ { gsub(/[^0-9]/, "", $1); print $1 }' /proc/mtd)
 [ -n "$rootfs_mtd" ] || { echo "rootfs MTD not found"; exit 1; }
 rootfs_dev=/dev/mtd${rootfs_mtd}
 echo "rootfs MTD: $rootfs_dev"
+
+mtd_size() {
+    awk -v n="$1" '$4 == "\""n"\"" { print $2; exit }' /proc/mtd
+}
+mtd_index() {
+    awk -v n="$1" '$4 == "\""n"\"" { gsub(/[^0-9]/, "", $1); print $1; exit }' /proc/mtd
+}
+check_mtd() {
+    name="$1"; want_idx="$2"; want_size="$3"
+    idx=$(mtd_index "$name"); size=$(mtd_size "$name")
+    if [ "$idx" != "$want_idx" ] || [ -z "$size" ] ||
+       [ $((0x$size)) -ne $((0x$want_size)) ]; then
+        echo "MAX layout mismatch: $name mtd=${idx:-missing} size=${size:-missing}, expected mtd$want_idx/0x$want_size"
+        exit 1
+    fi
+}
+
+mibib_sha=$(dd if=/dev/mtd2 bs=256k count=1 2>/dev/null | sha256sum | cut -d' ' -f1)
+[ "$mibib_sha" = e482188b9d950fd6fa8375df002f143600911a4472e186c9172d072e0fd034a0 ] || {
+    echo "MIBIB table is not the known MAX layout; stop"; exit 1; }
+
+check_mtd "0:MIBIB" 2 100000
+check_mtd "0:APPSBLENV" 17 80000
+check_mtd "0:APPSBL" 18 180000
+check_mtd "0:APPSBL_1" 19 180000
+check_mtd "0:ART" 20 140000
+check_mtd "0:ETHPHYFW" 21 100000
+check_mtd "rootfs" 24 be00000
+check_mtd "bdata" 25 40000
+check_mtd "crash" 26 40000
+check_mtd "crash_syslog" 27 40000
+[ -z "$(mtd_size overlay)" ] || { echo "v2 layout: overlay present"; exit 1; }
+
+rootfs_size=$(mtd_size rootfs)
+[ -f /tmp/rootfs-ubi.bin ] || { echo "rollback backup missing"; exit 1; }
+backup_bytes=$(wc -c < /tmp/rootfs-ubi.bin)
+[ "$backup_bytes" -eq $((0x$rootfs_size)) ] || {
+    echo "rollback backup truncated: $backup_bytes bytes, expected $((0x$rootfs_size))";
+    exit 1; }
 
 ubi_dev=
 for f in /sys/class/ubi/ubi*/mtd_num; do
@@ -205,9 +277,10 @@ there is no rebuild path in this tree.
 even with a corrupt UBI, because the initramfs is loaded into RAM.
 
 **B. U-Boot web recovery.** Connect the PC at `192.168.31.100/24` and open
-`http://192.168.31.1` (live env) or `http://192.168.1.1` (built-in default;
-confirm which one answers). Pages: `/index.html`, `/flashing.html`,
-`/uboot.html`, `/mibib.html`, `/art.html`.
+`http://192.168.31.1` for the live environment. If only the built-in default
+answers, change the PC to `192.168.1.100/24` and open `http://192.168.1.1`.
+Confirm which address answers before uploading. Pages: `/index.html`,
+`/flashing.html`, `/uboot.html`, `/mibib.html`, `/art.html`.
 
 - **U-Boot** page runs `flash 0:APPSBL; flash 0:APPSBL_1` — it rewrites both
   copies. Only use the MAX `uboot.bin`.
@@ -224,13 +297,29 @@ mtd write mibib.bin /dev/mtd2
 mtd write uboot.bin /dev/mtd18
 ```
 
+The 262,144-byte `mibib.bin` is the `mtd write` file; do not pad it for
+this path. It writes the 256 KiB table and leaves the rest of the 1 MiB
+MIBIB partition untouched. After writing, verify the first 256 KiB:
+
+```sh
+dd if=/dev/mtd2 bs=256k count=1 2>/dev/null | sha256sum
+# e482188b9d950fd6fa8375df002f143600911a4472e186c9172d072e0fd034a0
+```
+
 That updates the primary `0:APPSBL` only; `0:APPSBL_1` is left as-is. The web
-U-Boot page is the way to update both.
+U-Boot page is the way to update both, and it expects a 1 MiB file.
 
 **D. MIBIB reflash.** Only if mtd2 is corrupt. Use the MAX table; never the
 v2 table (it moves bdata/crash and splits rootfs into 120 MiB + 70 MiB
-`overlay`). Re-check `mtd2` against `e482188b9d950fd6fa8375df002f143600911a4472e186c9172d072e0fd034a0`
-after writing.
+`overlay`). The first 256 KiB of the live MIBIB is the MAX table
+(`e482...`); the full 1 MiB partition hash is
+`7b42075098c82de8ef29655b04d740cee9aa9dd643e7de72f554ac7d0ee6a576`.
+Re-check only the table area after writing:
+
+```sh
+dd if=/dev/mtd2 bs=256k count=1 2>/dev/null | sha256sum
+# must be e482188b9d950fd6fa8375df002f143600911a4472e186c9172d072e0fd034a0
+```
 
 ## 7. Stop conditions
 

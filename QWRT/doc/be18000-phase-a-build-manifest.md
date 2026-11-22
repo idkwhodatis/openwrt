@@ -182,7 +182,9 @@ Phase D-G audit evidence (2026-11-22):
   the rootfs UBI through `/sys/class/ubi/ubi*/mtd_num` and detaches it
   before formatting, and that the image's `rootfs_data` volume at ID 2
   has no data LEBs and carries the volume-table autoresize flag.  It
-  also checks the artifact table against the archived files.
+  also checks the MAX partition/hash guard, rollback-backup size guards,
+  Linux-side transfer setup and MIBIB first-256-KiB verification, and the
+  artifact table against the archived files.
 - The DTB contains I2C devices `temperature-sensor@4c` (LM63) and
   `fan-controller@2f` (EMC2305), the PWM controller, and the
   `ramoops@4dd00000` reservation.

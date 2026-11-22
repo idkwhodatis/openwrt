@@ -47,6 +47,20 @@ def main():
     assert "rootfs_data" in text and "(vol 2)" in text
     assert "edbe63e5fb1b6b53d2bbb207b928be959f0efa2c06a86cc90a55d56628093526" not in text
 
+    assert "MIBIB table is not the known MAX layout" in text
+    assert "MAX layout mismatch" in text
+    assert 'check_mtd "rootfs" 24 be00000' in text
+    assert "v2 layout: overlay present" in text
+    assert "truncated rootfs UBI backup" in text
+    assert "rollback backup truncated" in text
+    assert "ip addr add 192.168.31.1/24" in text
+    assert "ping -c 1 192.168.31.100" in text
+    assert "be18000-backup.tar" in text
+    assert "192.168.1.100/24" in text
+    assert "dd if=/dev/mtd2 bs=256k count=1" in text
+    assert "e482188b9d950fd6fa8375df002f143600911a4472e186c9172d072e0fd034a0" in text
+    assert "7b42075098c82de8ef29655b04d740cee9aa9dd643e7de72f554ac7d0ee6a576" in text
+
     manifest = MANIFEST.read_text(encoding="utf-8")
     rows = re.findall(
         r"`(openwrt-[^`]+|profiles\.json)` \| ([\d,]+) \| `([0-9a-f]{64})`",
