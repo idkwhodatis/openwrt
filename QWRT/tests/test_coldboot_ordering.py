@@ -105,9 +105,15 @@ class ColdBoot:
     def host_cap_cal_done(self):
         return self.cal_done and self.caldb_valid
 
-    def mission_mem_request(self, size, paddr):
+    def mission_mem_request(self, segments):
         if not self.caldb_valid:
             return True
+        found = [i for i, (kind, _size, _paddr) in enumerate(segments)
+                 if kind == "CALDB"]
+        if len(found) != 1 or found[0] != self.caldb_idx:
+            self.invalidate_caldb()
+            raise IncompatibleCaldb("mission request has duplicate or moved CALDB")
+        _kind, size, paddr = segments[found[0]]
         if (size != self.caldb_size or paddr != self.caldb_paddr or
                 not self.caldb[self.caldb_idx]["mapped"]):
             self.invalidate_caldb()
@@ -131,9 +137,10 @@ def source_checks():
     assert "ATH12K_QMI_COLD_BOOT_WAIT_CAL" in cb
     assert "ath12k_qmi_cold_boot_find_caldb" in cb
 
-    assert "rejecting incompatible CALDB target-memory request" in text
-    assert "ab->qmi.caldb_idx >= ab->qmi.mem_seg_count" in text
-    assert "ab->qmi.caldb_idx].paddr != ab->qmi.caldb_paddr" in text
+    assert "rejecting incompatible mission CALDB request" in text
+    assert "ath12k_qmi_cold_boot_mission_caldb_valid(&ab->qmi)" in text
+    assert "return found == 1;" in text
+    assert "chunk->prev_type != CALDB_MEM_REGION_TYPE" in text
 
     assert "req.cal_done = ath12k_qmi_cold_boot_caldb_valid(ab);" in text
     assert "ath12k_qmi_cold_boot_invalidate_caldb(ab);" in text
@@ -225,7 +232,8 @@ def test_mission_memory_keeps_caldb():
     assert cb.cal_done_event()
     assert cb.worker_finish()
     assert cb.host_cap_cal_done()
-    assert cb.mission_mem_request(cb.caldb_size, cb.caldb_paddr)
+    assert cb.mission_mem_request(
+        [("CALDB", cb.caldb_size, cb.caldb_paddr)])
 
 
 def test_mission_memory_replacement_is_rejected():
@@ -236,13 +244,47 @@ def test_mission_memory_replacement_is_rejected():
     assert cb.cal_done_event()
     assert cb.worker_finish()
     try:
-        cb.mission_mem_request(cb.caldb_size // 2, cb.caldb_paddr)
+        cb.mission_mem_request(
+            [("CALDB", cb.caldb_size // 2, cb.caldb_paddr)])
     except IncompatibleCaldb:
         pass
     else:
         raise AssertionError("incompatible CALDB request was accepted")
     assert not cb.host_cap_cal_done()
     assert not cb.caldb_valid
+
+
+def test_mission_duplicate_caldb_request_is_rejected():
+    cb = ColdBoot()
+    cb.fw_ready_event()
+    cb.worker_begin()
+    cb.mode_send_ok()
+    assert cb.cal_done_event()
+    assert cb.worker_finish()
+    segment = ("CALDB", cb.caldb_size, cb.caldb_paddr)
+    try:
+        cb.mission_mem_request([segment, segment])
+    except IncompatibleCaldb:
+        pass
+    else:
+        raise AssertionError("duplicate CALDB request was accepted")
+    assert not cb.host_cap_cal_done()
+
+
+def test_mission_omitted_caldb_request_is_rejected():
+    cb = ColdBoot()
+    cb.fw_ready_event()
+    cb.worker_begin()
+    cb.mode_send_ok()
+    assert cb.cal_done_event()
+    assert cb.worker_finish()
+    try:
+        cb.mission_mem_request([])
+    except IncompatibleCaldb:
+        pass
+    else:
+        raise AssertionError("CALDB-less mission request was accepted")
+    assert not cb.host_cap_cal_done()
 
 
 def main():
@@ -256,6 +298,8 @@ def main():
         test_mode_request_failure_still_restarts,
         test_mission_memory_keeps_caldb,
         test_mission_memory_replacement_is_rejected,
+        test_mission_duplicate_caldb_request_is_rejected,
+        test_mission_omitted_caldb_request_is_rejected,
     ]
     for test in tests:
         test()

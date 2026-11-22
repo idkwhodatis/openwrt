@@ -50,7 +50,8 @@ It implements:
 Offline event-ordering checks live in
 `QWRT/tests/test_coldboot_ordering.py` and cover fast CAL_DONE, the
 post-mode-7 deadline, late and CALDB-less indications, mode-request
-failure, and CALDB replacement rejection.
+failure, CALDB replacement rejection, duplicate mission CALDB segments
+and mission requests that omit CALDB.
 
 The fixed-memory target path remains excluded because
 `CALDB_MEM_REGION_TYPE` has no reserved-memory region there; only the

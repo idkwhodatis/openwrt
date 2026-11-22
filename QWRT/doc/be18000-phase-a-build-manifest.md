@@ -155,7 +155,7 @@ Phase D/G source changes (2026-11-22):
   restart, second `HOST_CAP` and MLO suppression during calibration.
   The CAL_DONE deadline starts after mode 7 is accepted, the worker
   consumes an already-completed result, and mission memory requests
-  cannot replace a retained CALDB allocation.  Eight offline
+  cannot replace a retained CALDB allocation.  Ten offline
   event-ordering checks pass; the default image keeps normal mission
   mode.  See the [Phase E status](be18000-phase-e-coldboot.md).
 
@@ -172,14 +172,17 @@ Phase D-G audit evidence (2026-11-22):
 - The rootfs `ath12k.ko` exposes `parm: cold_boot_cal:bool` from patch
   701.  No `/etc/modules.conf` option or UCI default sets it, so mission
   mode remains the shipped behavior.
-- `QWRT/tests/test_coldboot_ordering.py` passes 8 cases covering the
+- `QWRT/tests/test_coldboot_ordering.py` passes 10 cases covering the
   fast-result restart, post-mode-7 deadline, late CAL_DONE rejection,
   deadline-race rejection, CALDB-less CAL_DONE, mode-request fallback,
-  retained CALDB reuse and incompatible CALDB replacement.
+  retained CALDB reuse, incompatible CALDB replacement, duplicate
+  mission CALDB and a mission request that omits CALDB.
 - `QWRT/tests/test_recovery_runbook.py` verifies that the first-flash
   digest matches the archived `factory.ubi`, that the runbook resolves
-  and detaches the rootfs UBI before formatting, and that the image has
-  the empty autoresizing `rootfs_data` volume at ID 2.
+  the rootfs UBI through `/sys/class/ubi/ubi*/mtd_num` and detaches it
+  before formatting, and that the image's `rootfs_data` volume at ID 2
+  has no data LEBs and carries the volume-table autoresize flag.  It
+  also checks the artifact table against the archived files.
 - The DTB contains I2C devices `temperature-sensor@4c` (LM63) and
   `fan-controller@2f` (EMC2305), the PWM controller, and the
   `ramoops@4dd00000` reservation.
@@ -192,11 +195,11 @@ Artifacts are archived under `QWRT/extracted/be18000-build/`.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,109,668 | `350cbfa67f14431418126a419b03ac5b3f1c5ce0a50deb8263ce6530d039a5bf` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `ca94bc133adcfbed495567e368056aa46be971256635a77d7b2e32e63f0cc6cf` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,107,781 | `d7f0939a30d111870c84f478434e3a94edec0b64adebbacc04bf95fd56c4f02a` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,109,764 | `a7178a71e4bf4ad824bdc180f05b8a223d2a88f57582477f9432b4f7861fa9f8` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `83947e3d5da442906c6033ea1f34fa02eb3467867d56b71ccef2386915a7e403` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,107,781 | `023dbcdab619474d6ab8f0e0814ad237451b6dac857820be2ca21b944a700270` |
 | `openwrt-qualcommbe-ipq95xx-xiaomi_be18000.manifest` | 4,471 | `7f22d11663e8815013c4c01f63caba77cc71fb3d051784193e81a5251d950823` |
-| `profiles.json` | 2,123 | `943ce3b2744a0232ad152050901a4ce3e1a0c020c5c7b88ab7a09820d8ced6ce` |
+| `profiles.json` | 2,123 | `4c6c4e57fb8600d51d0f0f123ad7172faf0c918ea333be0815f9e534f8532d39` |
 | `config.buildinfo` | 152 | `b65255fd8dbd33a196f1aad512d07e5c8a28188de75c82bb25561d2447abc4b3` |
 
 ## FIT inspection

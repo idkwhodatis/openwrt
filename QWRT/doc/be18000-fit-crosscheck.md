@@ -10,9 +10,9 @@ Build outputs under `QWRT/extracted/be18000-build/` (recorded in
 
 | File | SHA-256 |
 |---|---|
-| `...-initramfs-uImage.itb` | `350cbfa67f14431418126a419b03ac5b3f1c5ce0a50deb8263ce6530d039a5bf` |
-| `...-squashfs-factory.ubi` | `ca94bc133adcfbed495567e368056aa46be971256635a77d7b2e32e63f0cc6cf` |
-| `...-squashfs-sysupgrade.bin` | `d7f0939a30d111870c84f478434e3a94edec0b64adebbacc04bf95fd56c4f02a` |
+| `...-initramfs-uImage.itb` | `a7178a71e4bf4ad824bdc180f05b8a223d2a88f57582477f9432b4f7861fa9f8` |
+| `...-squashfs-factory.ubi` | `83947e3d5da442906c6033ea1f34fa02eb3467867d56b71ccef2386915a7e403` |
+| `...-squashfs-sysupgrade.bin` | `023dbcdab619474d6ab8f0e0814ad237451b6dac857820be2ca21b944a700270` |
 
 Live reference: `QWRT/extracted/live-be18000/firmware/live-kernel.fit`.
 
@@ -21,7 +21,9 @@ Live reference: `QWRT/extracted/live-be18000/firmware/live-kernel.fit`.
 `QWRT/UBoot/compare_fit.py` parses the FDT of each FIT directly (no
 `mkimage` needed), reads the board DTB out of the `fdt-*` image, and parses
 the `kernel` volume out of `factory.ubi` with a minimal UBI reader
-(PEB 0x20000, VID header 0x800, data offset 0x1000).
+(PEB 0x20000, VID header 0x800, data offset 0x1000).  The UBI volume
+table is read directly; the `rootfs_data` autoresize marker comes from
+`ubi_vtbl_record.flags` bit 0, not from an empty-LEB heuristic.
 
 ```bash
 python QWRT/UBoot/compare_fit.py

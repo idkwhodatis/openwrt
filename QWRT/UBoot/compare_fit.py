@@ -147,16 +147,24 @@ def ubi_volumes(path):
                     break
                 name_len = struct.unpack(">H", rec[14:16])[0]
                 if 0 < name_len <= 127:
-                    vtbl[i // 172] = rec[16:16 + name_len].decode("latin1")
+                    name = rec[16:16 + name_len].decode("latin1")
+                    # ubi_vtbl_record.flags is byte 144; bit 0 is
+                    # UBI_VTBL_AUTORESIZE_FLG.
+                    autoresize = bool(rec[144] & 0x01)
+                    vtbl[i // 172] = (name, autoresize)
             continue
         vols.setdefault(vol_id, {})[lnum] = data
     names = {}
+    autoresize_volumes = set()
     for vol_id in sorted(set(vols) | set(vtbl)):
         leb_map = vols.get(vol_id, {})
-        names[vol_id] = vtbl.get(vol_id, f"vol{vol_id}")
-        extra = " (autoresize)" if not leb_map else ""
-        print(f"  UBI volume {vol_id}: {names[vol_id]!r} lebs={len(leb_map)}{extra}")
-    return vols, names
+        name, autoresize = vtbl.get(vol_id, (f"vol{vol_id}", False))
+        names[vol_id] = name
+        if autoresize:
+            autoresize_volumes.add(vol_id)
+        extra = " (autoresize)" if autoresize else ""
+        print(f"  UBI volume {vol_id}: {name!r} lebs={len(leb_map)}{extra}")
+    return vols, names, autoresize_volumes
 
 
 def main():
@@ -170,7 +178,7 @@ def main():
         rows.append(fit_summary(open(live_fit, "rb").read(), "live QWRT FIT"))
     if factory:
         print("factory.ubi volumes:")
-        vols, names = ubi_volumes(factory[0])
+        vols, names, autoresize_volumes = ubi_volumes(factory[0])
         for vol_id, leb_map in vols.items():
             if names.get(vol_id) == "kernel":
                 data = b"".join(leb_map[i] for i in sorted(leb_map))

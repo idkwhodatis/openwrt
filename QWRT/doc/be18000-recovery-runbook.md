@@ -117,7 +117,7 @@ Still in the initramfs, fetch `factory.ubi` (17,039,360 bytes) to `/tmp`:
 ```sh
 # PC push, or wget from a local HTTP server
 nc -l -p 9001 > /tmp/factory.ubi
-sha256sum /tmp/factory.ubi   # must be ca94bc133adcfbed495567e368056aa46be971256635a77d7b2e32e63f0cc6cf
+sha256sum /tmp/factory.ubi   # must be 83947e3d5da442906c6033ea1f34fa02eb3467867d56b71ccef2386915a7e403
 ```
 
 Resolve the `rootfs` mtd by name, then detach any UBI that the bootloader's
@@ -129,18 +129,35 @@ rootfs_mtd=$(awk '$4 ~ /rootfs/ { gsub(/[^0-9]/, "", $1); print $1 }' /proc/mtd)
 rootfs_dev=/dev/mtd${rootfs_mtd}
 echo "rootfs MTD: $rootfs_dev"
 
-if [ -e /sys/class/mtd/mtd${rootfs_mtd}/ubi_num ]; then
-    ubidetach -m "$rootfs_mtd" || { echo "UBI detach failed"; exit 1; }
+ubi_dev=
+for f in /sys/class/ubi/ubi*/mtd_num; do
+    [ -e "$f" ] || continue
+    if [ "$(cat "$f")" = "$rootfs_mtd" ]; then
+        ubi_dev=${f%/mtd_num}
+        ubi_dev=${ubi_dev##*/}
+        break
+    fi
+done
+
+if [ -n "$ubi_dev" ]; then
+    echo "detaching $ubi_dev from mtd${rootfs_mtd}"
+    ubidetach -d "${ubi_dev#ubi}" || { echo "UBI detach failed"; exit 1; }
 fi
-[ ! -e /sys/class/mtd/mtd${rootfs_mtd}/ubi_num ] ||
-    { echo "UBI still attached"; exit 1; }
+
+for f in /sys/class/ubi/ubi*/mtd_num; do
+    [ -e "$f" ] || continue
+    if [ "$(cat "$f")" = "$rootfs_mtd" ]; then
+        echo "UBI still attached to mtd${rootfs_mtd}"; exit 1
+    fi
+done
+
 if grep -qE "(${rootfs_dev}( |$)|ubi[0-9]+_|ubiblock[0-9]+_)" /proc/mounts; then
     echo "rootfs UBI is mounted"; exit 1
 fi
 ```
 
-If `ubidetach -m` is unavailable, stop and resolve the attached UBI with
-`ubinfo -a` and `/sys/class/mtd/mtd${rootfs_mtd}/ubi_num` before writing.
+If `ubidetach` is unavailable, stop and resolve the attached UBI with
+`ubinfo -a` and `/sys/class/ubi/ubi*/mtd_num` before writing.
 Do not run `ubiformat` while the existing UBI is attached or mounted.
 
 Write only the resolved `rootfs` mtd:

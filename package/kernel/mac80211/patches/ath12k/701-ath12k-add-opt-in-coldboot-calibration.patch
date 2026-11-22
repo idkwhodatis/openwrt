@@ -24,10 +24,11 @@ arrives before mode 7, after the deadline, or without retained CALDB is
 ignored and the attempt falls back to mission mode.
 
 The CALDB DMA allocation is retained across the reset.  A mission-mode
-target-memory request must keep the same CALDB index, size, physical
-address and backing; a replacement request is rejected and invalidates
-the calibration result.  The mission HOST_CAP advertises cal_done=1 only
-while both cal_done and the retained-CALDB flag are set.
+target-memory request must contain exactly one CALDB segment at the same
+index, with the same size, physical address, allocation metadata and
+backing; a duplicate, moved, resized or missing CALDB segment is rejected
+and invalidates the calibration result.  The mission HOST_CAP advertises
+cal_done=1 only while both cal_done and the retained-CALDB flag are set.
 
 Coldboot host-cap requests are issued per chip without MLO capabilities.
 Group host-cap negotiation is deferred while any radio in the group is
@@ -63,7 +64,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  #include <linux/of.h>
  #include <linux/firmware.h>
  #include <linux/of_address.h>
-@@ -19,6 +21,71 @@
+@@ -19,6 +21,97 @@
  #define PLATFORM_CAP_PCIE_GLOBAL_RESET	0x08
  #define ATH12K_QMI_MAX_CHUNK_SIZE	2097152
  
@@ -132,10 +133,36 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
 +	return found;
 +}
 +
++static bool
++ath12k_qmi_cold_boot_mission_caldb_valid(struct ath12k_qmi *qmi)
++{
++	struct target_mem_chunk *chunk;
++	int i, found = 0;
++
++	for (i = 0; i < qmi->mem_seg_count; i++) {
++		if (qmi->target_mem[i].type != CALDB_MEM_REGION_TYPE)
++			continue;
++
++		found++;
++		if (i != qmi->caldb_idx)
++			return false;
++
++		chunk = &qmi->target_mem[i];
++		if (chunk->size != qmi->caldb_size ||
++		    chunk->paddr != qmi->caldb_paddr ||
++		    chunk->prev_type != CALDB_MEM_REGION_TYPE ||
++		    chunk->prev_size != qmi->caldb_size ||
++		    !chunk->v.addr)
++			return false;
++	}
++
++	return found == 1;
++}
++
  static const struct qmi_elem_info wlfw_host_mlo_chip_info_s_v01_ei[] = {
  	{
  		.data_type      = QMI_UNSIGNED_1_BYTE,
-@@ -2015,6 +2082,32 @@
+@@ -2015,6 +2108,32 @@
  	},
  };
  
@@ -168,7 +195,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  static const struct qmi_elem_info qmi_wlanfw_wlan_ini_req_msg_v01_ei[] = {
  	{
  		.data_type	= QMI_OPT_FLAG,
-@@ -2092,6 +2185,12 @@
+@@ -2092,6 +2211,12 @@
  	u8 hw_link_id = 0;
  	int i, j, ret;
  
@@ -181,7 +208,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  	if (!ag->mlo_capable) {
  		ath12k_dbg(ab, ATH12K_DBG_QMI,
  			   "MLO is disabled hence skip QMI MLO cap");
-@@ -2219,7 +2318,7 @@
+@@ -2219,7 +2344,7 @@
  	}
  
  	req.cal_done_valid = 1;
@@ -190,7 +217,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  
  	if (ab->hw_params->qmi_cnss_feature_bitmap) {
  		req.feature_list_valid = 1;
-@@ -2579,6 +2678,8 @@
+@@ -2579,6 +2704,8 @@
  		ag->mlo_mem.init_done = false;
  		ag->mlo_mem.mlo_mem_size = 0;
  	}
@@ -199,7 +226,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  }
  
  static int ath12k_qmi_alloc_chunk(struct ath12k_base *ab,
-@@ -2626,11 +2727,27 @@
+@@ -2626,11 +2753,22 @@
  {
  	struct target_mem_chunk *chunk, *mlo_chunk;
  	struct ath12k_hw_group *ag = ab->ag;
@@ -211,14 +238,9 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  
 +	spin_lock_irqsave(&ab->qmi.cold_boot_lock, flags);
 +	if (ab->qmi.caldb_valid &&
-+	    (ab->qmi.caldb_idx < 0 ||
-+	     ab->qmi.caldb_idx >= ab->qmi.mem_seg_count ||
-+	     ab->qmi.target_mem[ab->qmi.caldb_idx].type != CALDB_MEM_REGION_TYPE ||
-+	     ab->qmi.target_mem[ab->qmi.caldb_idx].size != ab->qmi.caldb_size ||
-+	     ab->qmi.target_mem[ab->qmi.caldb_idx].paddr != ab->qmi.caldb_paddr ||
-+	     !ab->qmi.target_mem[ab->qmi.caldb_idx].v.addr)) {
++	    !ath12k_qmi_cold_boot_mission_caldb_valid(&ab->qmi)) {
 +		spin_unlock_irqrestore(&ab->qmi.cold_boot_lock, flags);
-+		ath12k_err(ab, "rejecting incompatible CALDB target-memory request\n");
++		ath12k_err(ab, "rejecting incompatible mission CALDB request\n");
 +		ret = -EINVAL;
 +		goto err;
 +	}
@@ -227,7 +249,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  	if (!ag->mlo_mem.init_done) {
  		memset(ag->mlo_mem.chunk, 0, sizeof(ag->mlo_mem.chunk));
  		ag->mlo_mem.init_done = true;
-@@ -3633,6 +3750,142 @@
+@@ -3633,6 +3771,142 @@
  	return 0;
  }
  
@@ -370,7 +392,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  static int
  ath12k_qmi_driver_event_post(struct ath12k_qmi *qmi,
  			     enum ath12k_qmi_event_type type,
-@@ -3683,6 +3936,9 @@
+@@ -3683,6 +3957,9 @@
  
  		if (!(ab && ab->qmi.num_radios != U8_MAX))
  			return false;
@@ -380,7 +402,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  	}
  
  	return true;
-@@ -3729,6 +3985,11 @@
+@@ -3729,6 +4006,11 @@
  		return ret;
  	}
  
@@ -392,7 +414,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  	spin_lock(&qmi->event_lock);
  
  	ath12k_qmi_set_event_block(qmi, true);
-@@ -3884,6 +4145,49 @@
+@@ -3884,6 +4166,49 @@
  	ath12k_qmi_driver_event_post(qmi, ATH12K_QMI_EVENT_FW_READY, NULL);
  }
  
@@ -442,7 +464,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  static const struct qmi_msg_handler ath12k_qmi_msg_handlers[] = {
  	{
  		.type = QMI_INDICATION,
-@@ -3906,6 +4210,13 @@
+@@ -3906,6 +4231,13 @@
  		.decoded_size = sizeof(struct qmi_wlanfw_fw_ready_ind_msg_v01),
  		.fn = ath12k_qmi_msg_fw_ready_cb,
  	},
@@ -456,7 +478,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  
  	/* end of list */
  	{},
-@@ -4014,6 +4325,11 @@
+@@ -4014,6 +4346,11 @@
  				break;
  			}
  
@@ -468,7 +490,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  			clear_bit(ATH12K_FLAG_CRASH_FLUSH,
  				  &ab->dev_flags);
  			ret = ath12k_core_qmi_firmware_ready(ab);
-@@ -4046,6 +4362,20 @@
+@@ -4046,6 +4383,20 @@
  	memset(&ab->qmi.target, 0, sizeof(struct target_info));
  	memset(&ab->qmi.target_mem, 0, sizeof(struct target_mem_chunk));
  	ab->qmi.ab = ab;
@@ -489,7 +511,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  
  	ab->qmi.target_mem_mode = ab->target_mem_mode;
  	ret = qmi_handle_init(&ab->qmi.handle, ATH12K_QMI_RESP_LEN_MAX,
-@@ -4064,6 +4394,7 @@
+@@ -4064,6 +4415,7 @@
  	INIT_LIST_HEAD(&ab->qmi.event_list);
  	spin_lock_init(&ab->qmi.event_lock);
  	INIT_WORK(&ab->qmi.event_work, ath12k_qmi_driver_event_work);
@@ -497,7 +519,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  
  	ret = qmi_add_lookup(&ab->qmi.handle, QMI_SERVICE_ID_WLFW,
  			     ATH12K_QMI_WLFW_SERVICE_VERS_V01,
-@@ -4082,6 +4413,7 @@
+@@ -4082,6 +4434,7 @@
  	if (!ab->qmi.ab)
  		return;
  

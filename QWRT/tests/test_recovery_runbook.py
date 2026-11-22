@@ -34,8 +34,9 @@ def main():
     digest = hashlib.sha256(FACTORY.read_bytes()).hexdigest()
     assert match.group(1) == digest, "runbook factory.ubi digest is stale"
 
-    assert 'ubidetach -m "$rootfs_mtd"' in text
-    assert "/sys/class/mtd/mtd${rootfs_mtd}/ubi_num" in text
+    assert "/sys/class/ubi/ubi*/mtd_num" in text
+    assert 'ubidetach -d "${ubi_dev#ubi}"' in text
+    assert "/sys/class/mtd/mtd${rootfs_mtd}/ubi_num" not in text
     assert "rootfs UBI is mounted" in text
     assert "rootfs_data" in text and "(vol 2)" in text
     assert "edbe63e5fb1b6b53d2bbb207b928be959f0efa2c06a86cc90a55d56628093526" not in text
@@ -53,11 +54,12 @@ def main():
 
     compare_fit = load_compare_fit()
     with contextlib.redirect_stdout(io.StringIO()):
-        volumes, names = compare_fit.ubi_volumes(str(FACTORY))
+        volumes, names, autoresize = compare_fit.ubi_volumes(str(FACTORY))
     assert names.get(0) == "kernel"
     assert names.get(1) == "rootfs"
     assert names.get(2) == "rootfs_data"
-    assert not volumes.get(2), "rootfs_data must be an empty autoresize volume"
+    assert 2 in autoresize, "rootfs_data must carry UBI_VTBL_AUTORESIZE_FLG"
+    assert not volumes.get(2), "rootfs_data must have no data LEBs yet"
 
     print(f"ok factory digest {digest}")
     print("ok rootfs MTD detach and three-volume checks")
