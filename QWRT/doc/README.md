@@ -1,6 +1,7 @@
 # Xiaomi BE10000 modified 6 GHz port investigation
 
-These are read-only findings and an implementation plan, not a flash procedure.
+These reports cover the hardware investigation, port implementation and
+validation status. The recovery runbook is listed separately below.
 
 Read the reports in order; later reports refine earlier unknowns:
 
@@ -21,6 +22,7 @@ Read the reports in order; later reports refine earlier unknowns:
 14. [QWRT U-Boot package analysis (MAX vs v2, live match)](be18000-uboot-package-analysis.md)
 15. [OpenWrt FIT vs live QWRT FIT cross-check](be18000-fit-crosscheck.md)
 16. [Recovery and first-flash runbook (MAX layout)](be18000-recovery-runbook.md)
+17. [No-SSH audit after the first flash: fixes and second-pass findings](be18000-no-ssh-audit.md)
 
 The owner's router is the 6 GHz hardware conversion identified by QWRT as
 `xiaomi,be18000`. Start with the [modified-unit source comparison](be10000-be18000-openwrt-gap-rounds.md#owners-modified-be10000-be18000-firmware-profile)
@@ -29,6 +31,14 @@ working system and the installer-supplied QSDK13 image.
 
 ## Current conclusions
 
+- The owner has reported no SSH after flashing a factory image. PPE
+  cleanup/NAPI teardown and QCA8084 startup-order fixes are on `master`
+  (`c463915`, `b1522ec`) and passed actual ARM64 driver compilation against
+  the fully patched Linux 6.18.64 source. A second source audit identified
+  conditional ath12k and EDMA failure paths; none has yet been matched to
+  a runtime log from the failed boot. See the
+  [no-SSH audit](be18000-no-ssh-audit.md) for evidence, limits and stage
+  discriminators. These changes need a rebuilt image for device validation.
 - Phase A/B/C/D-G has an offline `qualcommbe/ipq95xx` image for
   `xiaomi,be18000`: FIT `config@al02-c4`, gzip `0x42080000`, UBI
   `kernel`/`rootfs`/`rootfs_data`, the live 292,256-byte Xiaomi board-2,
@@ -93,8 +103,9 @@ working system and the installer-supplied QSDK13 image.
   QSEE/DEVCFG/APDP.
 - The installer has identified SKY85798 and RF/FEM-filter changes. Exact suffix,
   filters, component count and wiring remain unverified; see the latest report.
-- No router changes or port implementation have been performed during these
-  probes.
+- The historical read-only probes did not change the router. Subsequent
+  port implementation, offline builds and the post-flash audit are documented
+  in the later reports linked above.
 
 The initial report used previously extracted files. Probe 2 independently
 compared the supplied factory image's embedded DTB against the live DTB, but did
