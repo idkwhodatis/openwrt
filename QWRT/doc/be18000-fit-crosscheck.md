@@ -1,7 +1,8 @@
 # BE18000 OpenWrt FIT vs live QWRT FIT cross-check
 
-Status: offline check of the already-built Phase A artifacts. No hardware was
-used. This closes the "does our FIT match what `bootipq` expects" question.
+Status: offline check of the candidate rebuilt at merge `7c4b10bc78` on
+2026-11-22. No hardware was used. This closes the "does our FIT match what
+`bootipq` expects" question.
 
 ## Artifacts
 
@@ -10,9 +11,9 @@ Build outputs under `QWRT/extracted/be18000-build/` (recorded in
 
 | File | SHA-256 |
 |---|---|
-| `...-initramfs-uImage.itb` | `a7178a71e4bf4ad824bdc180f05b8a223d2a88f57582477f9432b4f7861fa9f8` |
-| `...-squashfs-factory.ubi` | `83947e3d5da442906c6033ea1f34fa02eb3467867d56b71ccef2386915a7e403` |
-| `...-squashfs-sysupgrade.bin` | `023dbcdab619474d6ab8f0e0814ad237451b6dac857820be2ca21b944a700270` |
+| `...-initramfs-uImage.itb` | `8bef93f87430a5259dc41827f7b5d98a44d02cf0a8ca16c82ca05e00c740ec3c` |
+| `...-squashfs-factory.ubi` | `2e66f3e5509f45c5757e0759cd1f50341b34bdbca362b3ba3e0ab96e627e9eb0` |
+| `...-squashfs-sysupgrade.bin` | `9a49ada011944156393a5081acb2b170818734c5b17a48e7cb41a074aeb95be7` |
 
 Live reference: `QWRT/extracted/live-be18000/firmware/live-kernel.fit`.
 
@@ -40,13 +41,14 @@ load              0x42080000                       0x42080000                   
 entry             0x42080000                       0x42080000                       0x42080000
 arch              arm64                            arm64                            arm64
 os                linux                            linux                            linux
+kernel_desc       ARM64 OpenWrt Linux-6.18.64      ARM64 OpenWrt Linux-5.4.250      ARM64 OpenWrt Linux-6.18.64
 fdt_desc          ARM64 OpenWrt xiaomi_be18000 ...  ARM64 OpenWrt xiaomi_be18000 ...  ARM64 OpenWrt xiaomi_be18000 ...
 bootargs_append   root=/dev/ubiblock0_1            root=/dev/ubiblock0_1 cnss2...   root=/dev/ubiblock0_1
 compatible        xiaomi,be18000                   xiaomi,be18000                   xiaomi,be18000
 ```
 
 Kernel/FDT payload differences are expected: the built images carry
-Linux 6.18.60 and our 45,531-byte DTB; the live QWRT FIT carries Linux
+Linux 6.18.64 and our 45,555-byte DTB; the live QWRT FIT carries Linux
 5.4.250 and an 85,168-byte QSDK DTB. Everything `bootipq` selects on matches.
 
 The `bootargs_append` row is the **board DTB** `chosen/bootargs-append`, not a
@@ -77,10 +79,10 @@ if (p != NULL && l > 0)
 bootloader cmdline, so the last `root=` wins. Verified on the built kernel:
 
 ```text
-FIT kernel image bytes 5986906 compression gzip
+FIT kernel image bytes 5994227 compression gzip
 decompressed kernel bytes 15124488
-bootargs-append -> 12606288
-Linux version 6.18.60 ... aarch64-openwrt-linux-musl-gcc ...
+bootargs-append -> 12607712
+Linux version 6.18.64 ... aarch64-openwrt-linux-musl-gcc ...
 ```
 
 The DTB in the built FIT has `chosen/bootargs-append = " root=/dev/ubiblock0_1"`.
@@ -91,7 +93,7 @@ UBI volumes in `factory.ubi`:
 
 ```text
 volume 0 "kernel"      48 LEBs
-volume 1 "rootfs"      80 LEBs
+volume 1 "rootfs"      83 LEBs
 volume 2 "rootfs_data" 0 data LEBs, autoresize
 ```
 
@@ -109,10 +111,10 @@ The live unit has `kernel`, `rootfs`, `rootfs_data`, and
    `root=/dev/ubiblock0_1 cnss2.enable_mlo_support=0 swiotlb=1 coherent_pool=2M`.
    `cnss2` is QSDK-only. `swiotlb=1`/`coherent_pool=2M` are optional;
    add them only if the RAM boot needs them.
-3. **FDT size/model.** Our DTB is smaller and uses
-   `model = "Xiaomi BE18000"` (the live QWRT DTB says
-   `"Xiaomi Router BE18000 Pro Max (Wi-Fi 7 320Mhz)"`). `compatible` matches,
-   which is what drivers bind on.
+3. **FDT size/model.** Our 45,555-byte DTB is smaller than the live
+   85,168-byte QSDK DTB and uses `model = "Xiaomi BE18000"` (the live
+   QWRT DTB says `"Xiaomi Router BE18000 Pro Max (Wi-Fi 7 320Mhz)"`).
+   `compatible` matches, which is what drivers bind on.
 4. **`append-bootargs` is not in the FIT root.** It is in the board DTB
    `chosen` node, and the mainline kernel's generic hack 920 consumes it
    (verified above). A FIT-root property would only matter for a U-Boot that

@@ -1,6 +1,7 @@
 # BE18000 mainline OpenWrt: Phase A-G offline build manifest
 
-Date: 2026-11-21; review fixes and D-G staging 2026-11-22
+Date: 2026-11-21; review fixes and D-G staging 2026-11-22;
+rebuilt at merge `7c4b10bc78` on 2026-11-22
 
 This manifest records the successful offline build of the
 `qualcommbe/ipq95xx` image for the modified BE10000 identified as
@@ -8,16 +9,22 @@ This manifest records the successful offline build of the
 static board-DTS gates only.  No serial console, RAM boot, NAND write,
 PCIe enumeration, PHY probe or radio probe has been performed.
 
+The artifact table and FIT/UBI measurements below were refreshed from a
+full rebuild of merge `7c4b10bc78` (Linux 6.18.64, mac80211 r17).  The
+pre-merge baseline remains archived under
+`QWRT/extracted/be18000-build-2ce7685bfa-20261122-1119/` for comparison.
+
 ## Source and build host
 
 | Item | Value |
 |---|---|
-| Source tree | fork `idkwhodatis/openwrt`, Phase A/B/C implementation |
+| Source tree | fork `idkwhodatis/openwrt`, merge `7c4b10bc78` |
+| Candidate build | 2026-11-22 rebuild with the APPSBLENV `fw_env` fix |
 | Build host | WSL2 Ubuntu 22.04, `/home/leaf/be18000-build` (case-sensitive ext4) |
 | Target | `qualcommbe`, subtarget `ipq95xx` |
 | Device | `CONFIG_TARGET_qualcommbe_ipq95xx_DEVICE_xiaomi_be18000=y` |
 | Rootfs | squashfs plus `CONFIG_TARGET_ROOTFS_INITRAMFS=y` |
-| Kernel | Linux 6.18.60, aarch64, musl, GCC 14.4.0 |
+| Kernel | Linux 6.18.64, aarch64, musl, GCC 14.4.0 |
 | Build command | `make REVISION=be18000 -j16 V=s` |
 
 The copied build tree has no `.git`, so `REVISION=be18000` is supplied
@@ -197,12 +204,12 @@ Artifacts are archived under `QWRT/extracted/be18000-build/`.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,109,764 | `a7178a71e4bf4ad824bdc180f05b8a223d2a88f57582477f9432b4f7861fa9f8` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `83947e3d5da442906c6033ea1f34fa02eb3467867d56b71ccef2386915a7e403` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,107,781 | `023dbcdab619474d6ab8f0e0814ad237451b6dac857820be2ca21b944a700270` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000.manifest` | 4,471 | `7f22d11663e8815013c4c01f63caba77cc71fb3d051784193e81a5251d950823` |
-| `profiles.json` | 2,123 | `4c6c4e57fb8600d51d0f0f123ad7172faf0c918ea333be0815f9e534f8532d39` |
-| `config.buildinfo` | 152 | `b65255fd8dbd33a196f1aad512d07e5c8a28188de75c82bb25561d2447abc4b3` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,697,136 | `8bef93f87430a5259dc41827f7b5d98a44d02cf0a8ca16c82ca05e00c740ec3c` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,432,576 | `2e66f3e5509f45c5757e0759cd1f50341b34bdbca362b3ba3e0ab96e627e9eb0` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,589,061 | `9a49ada011944156393a5081acb2b170818734c5b17a48e7cb41a074aeb95be7` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000.manifest` | 4,471 | `0719659611e6ad506a5ccc8f155a08c35b4d2a67412a61573452a6f9b97a138e` |
+| `profiles.json` | 2,123 | `5ebf932e2efcc20c733d937fb41caecfbb42ba672efe842a9bff8c70976fabac` |
+| `config.buildinfo` | 208 | `8505f588e3d2a036ddfd59ba93aa53068602d04ed25eb71786db27078a28ef31` |
 
 ## FIT inspection
 
@@ -210,10 +217,11 @@ Both the standalone initramfs FIT and the kernel volume inside
 `factory.ubi` report:
 
 - Default configuration: `config@al02-c4`
+- Kernel description: `ARM64 OpenWrt Linux-6.18.64`
 - Kernel compression: gzip
 - Load/entry: `0x42080000`
 - FDT description: `xiaomi_be18000`
-- FDT size: 45,531 bytes
+- FDT size: 45,555 bytes
 
 The embedded board DTB reports:
 
@@ -262,9 +270,9 @@ SFP:                 port6/sfp disabled; PHY 0x1e disabled, reset GPIO64
 `ubireader_display_info` on `factory.ubi`:
 
 - Min I/O 2048, LEB 126,976 bytes, PEB 131,072 bytes
-- 130 PEBs total (128 data, 2 layout)
+- 133 PEBs total (131 data, 2 layout)
 - Volume `kernel`, ID 0, 48 PEBs
-- Volume `rootfs`, ID 1, 80 PEBs, squashfs
+- Volume `rootfs`, ID 1, 83 PEBs, squashfs
 - Volume `rootfs_data`, ID 2, `autoresize`
 
 The `kernel` volume is a FIT; `mkimage -l` reports the same
@@ -285,7 +293,11 @@ volume:
 - `/lib/firmware/ath12k/QCN9274/hw2.0/firmware-2.bin` is present
   (16,035,896 bytes).
 - `/etc/uci-defaults/30_uboot-envtools` contains the
-  `xiaomi,be18000` `0:APPSBLENV` case.
+  `xiaomi,be18000` case with `ubootenv_add_mtd "0:APPSBLENV" "0x0"
+  "0x10000" "0x20000" "1"`.  This matches the live environment: its
+  stored CRC validates over the first 64 KiB only, while the NAND erase
+  block is 128 KiB.  The stock QWRT `/etc/fw_env.config`
+  (`0x40000 0x20000 2`) does not validate and must not be reused.
 - `/etc/openwrt_release` reports `OpenWrt SNAPSHOT be18000`.
 
 Package manifest subset:
@@ -293,17 +305,19 @@ Package manifest subset:
 ```text
 ath12k-firmware-qcn9274 20261019-r1
 ipq-wifi-xiaomi_be18000 1
-kmod-ath12k 6.18.60.7.2-r15
-kmod-mhi-bus 6.18.60-r1
-kmod-qrtr 6.18.60-r1
-kmod-qrtr-mhi 6.18.60-r1
-kmod-qcom-ppe 6.18.60-r1
-kmod-sfp 6.18.60-r1
-kmod-pstore 6.18.60-r1
-kmod-ramoops 6.18.60-r1
-kmod-hwmon-emc2305 6.18.60-r1
-kmod-hwmon-lm63 6.18.60-r1
-kmod-leds-pwm 6.18.60-r1
+kmod-ath12k 6.18.64.7.2-r17
+kmod-mhi-bus 6.18.64-r1
+kmod-qrtr 6.18.64-r1
+kmod-qrtr-mhi 6.18.64-r1
+kmod-qcom-ppe 6.18.64-r1
+kmod-sfp 6.18.64-r1
+kmod-pstore 6.18.64-r1
+kmod-ramoops 6.18.64-r1
+kmod-hwmon-emc2305 6.18.64-r1
+kmod-hwmon-lm63 6.18.64-r1
+kmod-leds-pwm 6.18.64-r1
+kmod-input-core 6.18.64-r1
+uboot-envtools 2026.10-r3
 ```
 
 ## Reproduce
@@ -338,8 +352,9 @@ make REVISION=be18000 -j"$(nproc)" V=s
 The seed selects target `qualcommbe`, subtarget `ipq95xx`, device
 `xiaomi_be18000`, the initramfs image and `kmod-input-core`;
 `make defconfig` fills in the remaining target, package and image
-defaults.  The archived 152-byte `config.buildinfo` is the complete
-non-default diff, not a truncated package list: `DEVICE_PACKAGES` in
+defaults.  The archived 208-byte `config.buildinfo` is the complete
+non-default diff, not a truncated package list (the copied-tree
+environment emits `CONFIG_GCC_VERSION` twice): `DEVICE_PACKAGES` in
 `target/linux/qualcommbe/image/ipq95xx.mk` supplies the per-device
 packages.  `REVISION=be18000` keeps the release string stable.  The
 copied WSL tree used for this manifest has no `.git`, so it is mandatory
@@ -376,6 +391,9 @@ This manifest does **not** establish:
   5G/6G operation or MLO;
 - SFP+ port 6, which is staged disabled because no mainline QCA SFP
   driver is present;
+- a read/write rehearsal of `fw_printenv`/`fw_setenv` against
+  `0:APPSBLENV`; the 64 KiB environment layout is validated against the
+  QWRT dump, but no write has been performed;
 - NAND writes, sysupgrade or recovery on hardware.
 
 The next hardware step is the serial/RAM-FIT gate in the port plan.  Do

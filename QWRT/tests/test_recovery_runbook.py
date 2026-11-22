@@ -34,6 +34,14 @@ def main():
     digest = hashlib.sha256(FACTORY.read_bytes()).hexdigest()
     assert match.group(1) == digest, "runbook factory.ubi digest is stale"
 
+    envtools = (REPO / "package" / "boot" / "uboot-tools" / "uboot-envtools" /
+                "files" / "qualcommbe_ipq95xx")
+    envtext = envtools.read_text(encoding="utf-8")
+    assert ('ubootenv_add_mtd "0:APPSBLENV" "0x0" "0x10000" "0x20000" "1"'
+            in envtext), "APPSBLENV fw_env layout is unsafe"
+    assert ("grep -qx '/dev/mtd17 0x0 0x10000 0x20000 1' /etc/fw_env.config"
+            in text), "runbook does not verify the generated fw_env layout"
+
     assert "/sys/class/ubi/ubi*/mtd_num" in text
     assert "/sys/class/mtd/mtd${rootfs_mtd}/ubi_num" not in text
     mount_check = ("/dev/(ubi${ubi_num}_[0-9]+|ubiblock${ubi_num}_[0-9]+|"
@@ -61,7 +69,7 @@ def main():
     assert "expected 199229440" in text
     assert "ncat -l -p 9001 <" in text
     assert "nc 192.168.31.100 9001 > /tmp/factory.ubi" in text
-    assert "expected 17039360" in text
+    assert "expected 17432576" in text
     assert "Do **not** run sysupgrade from the first boot" in text
     assert "booted successfully at least twice" in text
     assert "nc -l -p 9001 > /tmp/factory.ubi" not in text
@@ -91,6 +99,7 @@ def main():
     assert not volumes.get(2), "rootfs_data must have no data LEBs yet"
 
     print(f"ok factory digest {digest}")
+    print("ok APPSBLENV fw_env layout")
     print("ok rootfs MTD detach and three-volume checks")
 
 

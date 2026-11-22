@@ -11,6 +11,7 @@ Read the reports in order; later reports refine earlier unknowns:
 5. [BE18000 live probe 4: AQR113C, QMI IDs, ART factory BDFs, gain LUT](be18000-live-probe-4.md)
 6. [BE18000 live probe 5: bootloader/FIT, PCIe, board I/O, CNSS debugfs](be18000-live-probe-5.md)
 7. [BE18000 probe rounds 1-29](be18000-probe-rounds.md)
+   · [Device checklist, starting with read-only SSH on QWRT](be18000-device-checklist.md)
 8. [BE18000 MLO incident: reboot and slow 6G recovery](be18000-mlo-incident.md)
 9. [QSDK DCS research: 6 GHz AWGN channel switch](be18000-qsdk-dcs-research.md)
 10. [QSDK13 MLO auth-path research: stale-peer recovery](be18000-qsdk13-mlo-auth-research.md)

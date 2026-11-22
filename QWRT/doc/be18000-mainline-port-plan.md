@@ -988,7 +988,7 @@ granular evidence and corrections.
   `DEVICE_FIT_APPEND_BOOTARGS` (or a `-b` option) that emits
   `append-bootargs = " root=/dev/ubiblock0_1";` at the FIT root. The verified
   boot path does not need it: generic hack 920 appends the DTB
-  `chosen/bootargs-append` in the built 6.18.60 kernel. Keep it only as
+  `chosen/bootargs-append` in the built 6.18.64 kernel. Keep it only as
   belt-and-braces if a bootloader replaces the DTB cmdline. Add
   `swiotlb=1 coherent_pool=2M` only if needed; omit `cnss2.*`.
 - Do not rely on `chosen/bootargs-append`: it is a QSDK-side property and

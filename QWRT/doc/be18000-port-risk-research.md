@@ -333,8 +333,8 @@ certain U-Boot path.
 root still has no `append-bootargs`, but the board DTB
 `chosen/bootargs-append` is consumed by OpenWrt's generic
 `target/linux/generic/hack-6.18/920-device_tree_cmdline.patch`, which appends
-it to the cmdline after the bootloader arguments. The built 6.18.60 kernel
-contains the `bootargs-append` string (offset 12606288 of the decompressed
+it to the cmdline after the bootloader arguments. The built 6.18.64 kernel
+contains the `bootargs-append` string (offset 12607712 of the decompressed
 `factory.ubi` kernel) and the DTB carries
 `chosen/bootargs-append = " root=/dev/ubiblock0_1"`. The last `root=` wins,
 so the squashfs mounts. See `be18000-fit-crosscheck.md`.

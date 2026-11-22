@@ -1,8 +1,9 @@
 # BE18000 recovery and first-flash runbook (MAX layout)
 
-Status: prepared offline. **Not executed on hardware.** The router is currently
-disconnected; every step below needs to be walked once with serial attached
-before it is trusted.
+Status: prepared offline. **Not executed on hardware.** A read-only QWRT
+baseline was captured over Wi-Fi on 2026-11-22; serial, TFTP and every NAND
+write are still untested.  Walk each step below once with serial attached
+before trusting it.
 
 This runbook uses only what was proven from the saved live unit:
 the MAX MIBIB (byte-identical to live `0:MIBIB`), the live `0:APPSBLENV`,
@@ -38,6 +39,11 @@ fsbootargs=ubi.mtd=rootfs root=mtd:ubi_rootfs rootfstype=squashfs \
 model=RC01                 machid=8050301      fdt_high=0x48500000
 flag_boot_rootfs=0         flag_boot_type=2    flag_boot_success=1
 ```
+
+The live environment CRC validates over the first 64 KiB only, while the
+NAND erase block is 128 KiB.  The mainline image generates
+`/dev/mtd17 0x0 0x10000 0x20000 1` for `fw_env`.  The stock QWRT
+`/etc/fw_env.config` (`0x40000 0x20000 2`) is wrong and must not be copied.
 
 Built images (`QWRT/extracted/be18000-build/`):
 
@@ -77,6 +83,11 @@ From the initramfs:
 
 ```sh
 cat /proc/mtd
+cat /etc/fw_env.config
+grep -qx '/dev/mtd17 0x0 0x10000 0x20000 1' /etc/fw_env.config || {
+    echo "APPSBLENV fw_env layout mismatch"; exit 1; }
+fw_printenv bootcmd bootargs fsbootargs flag_boot_rootfs flag_boot_type flag_boot_success
+
 rootfs_mtd=$(awk '$4 ~ /rootfs/ { gsub(/[^0-9]/, "", $1); print $1 }' /proc/mtd)
 [ -n "$rootfs_mtd" ] || { echo "rootfs MTD not found"; exit 1; }
 rootfs_dev=/dev/mtd${rootfs_mtd}
@@ -158,7 +169,7 @@ Do not continue until every file is off the router and hashed.
 
 ## 4. Step 1 — first OpenWrt write
 
-Still in the initramfs, pull `factory.ubi` (17,039,360 bytes) from the PC
+Still in the initramfs, pull `factory.ubi` (17,432,576 bytes) from the PC
 using the router as the client, as in the backup transfer:
 
 ```sh
@@ -168,10 +179,10 @@ ncat -l -p 9001 < openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi
 # Router:
 nc 192.168.31.100 9001 > /tmp/factory.ubi
 factory_bytes=$(wc -c < /tmp/factory.ubi)
-[ "$factory_bytes" -eq 17039360 ] || {
-    echo "truncated factory.ubi: $factory_bytes bytes, expected 17039360";
+[ "$factory_bytes" -eq 17432576 ] || {
+    echo "truncated factory.ubi: $factory_bytes bytes, expected 17432576";
     exit 1; }
-sha256sum /tmp/factory.ubi   # must be 83947e3d5da442906c6033ea1f34fa02eb3467867d56b71ccef2386915a7e403
+sha256sum /tmp/factory.ubi   # must be 2e66f3e5509f45c5757e0759cd1f50341b34bdbca362b3ba3e0ab96e627e9eb0
 ```
 
 Resolve the `rootfs` mtd by name, then detach any UBI that the bootloader's
