@@ -9,12 +9,25 @@ disabled by default and requires an explicit module parameter:
 
     ath12k.cold_boot_cal=1
 
-When enabled, the first firmware boot is switched to calibration mode
-(7) after the FW_READY indication.  The driver decodes the CAL_DONE
-indication (0x3e), keeps the CALDB target-memory DMA allocation alive
-across the reset, and power-cycles the firmware into mission mode.  The
-mission-mode host-cap request carries cal_done=1 so the firmware reuses
-the calibration data.
+When enabled, the driver waits for the first FW_READY, sends the WLAN INI
+request, and sends calibration mode 7.  The 60-second CAL_DONE deadline
+starts only after the mode-7 request is accepted, so firmware discovery,
+memory negotiation and BDF transfer do not consume the calibration
+budget.
+
+The restart worker consumes the result and performs OFF, power-down,
+power-up and the mission-mode restart even when CAL_DONE or a mode-request
+failure landed before the worker was scheduled.  CAL_DONE is accepted
+only while the active attempt is in the WAIT_CAL state and only when a
+single CALDB target-memory chunk is still mapped.  An indication that
+arrives before mode 7, after the deadline, or without retained CALDB is
+ignored and the attempt falls back to mission mode.
+
+The CALDB DMA allocation is retained across the reset.  A mission-mode
+target-memory request must keep the same CALDB index, size, physical
+address and backing; a replacement request is rejected and invalidates
+the calibration result.  The mission HOST_CAP advertises cal_done=1 only
+while both cal_done and the retained-CALDB flag are set.
 
 Coldboot host-cap requests are issued per chip without MLO capabilities.
 Group host-cap negotiation is deferred while any radio in the group is
@@ -50,7 +63,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  #include <linux/of.h>
  #include <linux/firmware.h>
  #include <linux/of_address.h>
-@@ -19,6 +21,17 @@
+@@ -19,6 +21,71 @@
  #define PLATFORM_CAP_PCIE_GLOBAL_RESET	0x08
  #define ATH12K_QMI_MAX_CHUNK_SIZE	2097152
  
@@ -61,14 +74,68 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
 +
 +bool ath12k_qmi_cold_boot_pending(struct ath12k_base *ab)
 +{
-+	return ab->qmi.cold_boot_cal && !ab->qmi.cal_done &&
-+	       !ab->qmi.cal_timeout;
++	enum ath12k_qmi_cold_boot_state state =
++		READ_ONCE(ab->qmi.cold_boot_state);
++
++	return ab->qmi.cold_boot_cal &&
++	       state < ATH12K_QMI_COLD_BOOT_COMPLETE;
++}
++
++static void
++ath12k_qmi_cold_boot_invalidate_caldb_locked(struct ath12k_qmi *qmi)
++{
++	qmi->cal_done = 0;
++	qmi->caldb_valid = false;
++	qmi->caldb_idx = -1;
++	qmi->caldb_size = 0;
++	qmi->caldb_paddr = 0;
++}
++
++static void ath12k_qmi_cold_boot_invalidate_caldb(struct ath12k_base *ab)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&ab->qmi.cold_boot_lock, flags);
++	ath12k_qmi_cold_boot_invalidate_caldb_locked(&ab->qmi);
++	spin_unlock_irqrestore(&ab->qmi.cold_boot_lock, flags);
++}
++
++static bool ath12k_qmi_cold_boot_caldb_valid(struct ath12k_base *ab)
++{
++	unsigned long flags;
++	bool valid;
++
++	spin_lock_irqsave(&ab->qmi.cold_boot_lock, flags);
++	valid = ab->qmi.cal_done && ab->qmi.caldb_valid;
++	spin_unlock_irqrestore(&ab->qmi.cold_boot_lock, flags);
++
++	return valid;
++}
++
++static int ath12k_qmi_cold_boot_find_caldb(struct ath12k_qmi *qmi)
++{
++	int i, found = -1;
++
++	for (i = 0; i < qmi->mem_seg_count; i++) {
++		if (qmi->target_mem[i].type != CALDB_MEM_REGION_TYPE)
++			continue;
++
++		if (found >= 0)
++			return -EINVAL;
++
++		if (!qmi->target_mem[i].v.addr)
++			return -ENOENT;
++
++		found = i;
++	}
++
++	return found;
 +}
 +
  static const struct qmi_elem_info wlfw_host_mlo_chip_info_s_v01_ei[] = {
  	{
  		.data_type      = QMI_UNSIGNED_1_BYTE,
-@@ -2015,6 +2028,32 @@
+@@ -2015,6 +2082,32 @@
  	},
  };
  
@@ -101,7 +168,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  static const struct qmi_elem_info qmi_wlanfw_wlan_ini_req_msg_v01_ei[] = {
  	{
  		.data_type	= QMI_OPT_FLAG,
-@@ -2092,6 +2131,12 @@
+@@ -2092,6 +2185,12 @@
  	u8 hw_link_id = 0;
  	int i, j, ret;
  
@@ -114,77 +181,153 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  	if (!ag->mlo_capable) {
  		ath12k_dbg(ab, ATH12K_DBG_QMI,
  			   "MLO is disabled hence skip QMI MLO cap");
-@@ -3633,6 +3678,98 @@
+@@ -2219,7 +2318,7 @@
+ 	}
+ 
+ 	req.cal_done_valid = 1;
+-	req.cal_done = ab->qmi.cal_done;
++	req.cal_done = ath12k_qmi_cold_boot_caldb_valid(ab);
+ 
+ 	if (ab->hw_params->qmi_cnss_feature_bitmap) {
+ 		req.feature_list_valid = 1;
+@@ -2579,6 +2678,8 @@
+ 		ag->mlo_mem.init_done = false;
+ 		ag->mlo_mem.mlo_mem_size = 0;
+ 	}
++
++	ath12k_qmi_cold_boot_invalidate_caldb(ab);
+ }
+ 
+ static int ath12k_qmi_alloc_chunk(struct ath12k_base *ab,
+@@ -2626,11 +2727,27 @@
+ {
+ 	struct target_mem_chunk *chunk, *mlo_chunk;
+ 	struct ath12k_hw_group *ag = ab->ag;
++	unsigned long flags;
+ 	int i, mlo_idx, ret;
+ 	int mlo_size = 0;
+ 
+ 	mutex_lock(&ag->mutex);
+ 
++	spin_lock_irqsave(&ab->qmi.cold_boot_lock, flags);
++	if (ab->qmi.caldb_valid &&
++	    (ab->qmi.caldb_idx < 0 ||
++	     ab->qmi.caldb_idx >= ab->qmi.mem_seg_count ||
++	     ab->qmi.target_mem[ab->qmi.caldb_idx].type != CALDB_MEM_REGION_TYPE ||
++	     ab->qmi.target_mem[ab->qmi.caldb_idx].size != ab->qmi.caldb_size ||
++	     ab->qmi.target_mem[ab->qmi.caldb_idx].paddr != ab->qmi.caldb_paddr ||
++	     !ab->qmi.target_mem[ab->qmi.caldb_idx].v.addr)) {
++		spin_unlock_irqrestore(&ab->qmi.cold_boot_lock, flags);
++		ath12k_err(ab, "rejecting incompatible CALDB target-memory request\n");
++		ret = -EINVAL;
++		goto err;
++	}
++	spin_unlock_irqrestore(&ab->qmi.cold_boot_lock, flags);
++
+ 	if (!ag->mlo_mem.init_done) {
+ 		memset(ag->mlo_mem.chunk, 0, sizeof(ag->mlo_mem.chunk));
+ 		ag->mlo_mem.init_done = true;
+@@ -3633,6 +3750,142 @@
  	return 0;
  }
  
-+static int ath12k_qmi_process_coldboot_calibration(struct ath12k_base *ab)
-+{
-+	int ret;
-+
-+	ab->qmi.cold_boot_started = true;
-+
-+	ret = ath12k_qmi_wlanfw_wlan_ini_send(ab);
-+	if (ret) {
-+		ath12k_warn(ab, "coldboot wlan ini request failed: %d\n", ret);
-+		goto out;
-+	}
-+
-+	ret = ath12k_qmi_wlanfw_mode_send(ab,
-+					  ATH12K_FIRMWARE_MODE_CALIBRATION);
-+	if (ret) {
-+		ath12k_warn(ab, "coldboot mode request failed: %d\n", ret);
-+		goto out;
-+	}
-+
-+	ath12k_info(ab, "coldboot calibration started\n");
-+	return 0;
-+
-+out:
-+	/* Let the reset path fall back to a mission-mode boot. */
-+	ab->qmi.cal_timeout = true;
-+	complete_all(&ab->qmi.cal_done_completion);
-+	return ret;
-+}
-+
 +static void ath12k_qmi_cold_boot_work(struct work_struct *work)
 +{
 +	struct ath12k_qmi *qmi = container_of(work, struct ath12k_qmi,
 +					      cold_boot_work);
 +	struct ath12k_base *ab = qmi->ab;
 +	unsigned long timeout;
++	unsigned long flags;
++	bool success = false;
 +	int ret;
 +
-+	if (!qmi->cold_boot_cal || qmi->cal_done || qmi->cal_timeout)
++	spin_lock_irqsave(&qmi->cold_boot_lock, flags);
++	if (!qmi->cold_boot_cal ||
++	    qmi->cold_boot_state != ATH12K_QMI_COLD_BOOT_IDLE) {
++		spin_unlock_irqrestore(&qmi->cold_boot_lock, flags);
++		return;
++	}
++	spin_unlock_irqrestore(&qmi->cold_boot_lock, flags);
++
++	ath12k_dbg(ab, ATH12K_DBG_QMI, "coldboot waiting for FW_READY\n");
++	wait_for_completion(&qmi->fw_ready_completion);
++	if (READ_ONCE(qmi->cold_boot_cancelled))
 +		return;
 +
-+	ath12k_dbg(ab, ATH12K_DBG_QMI, "wait for coldboot calibration\n");
++	ret = ath12k_qmi_wlanfw_wlan_ini_send(ab);
++	if (ret) {
++		ath12k_warn(ab, "coldboot wlan ini request failed: %d\n", ret);
++		goto fail;
++	}
++
++	spin_lock_irqsave(&qmi->cold_boot_lock, flags);
++	if (qmi->cold_boot_cancelled) {
++		spin_unlock_irqrestore(&qmi->cold_boot_lock, flags);
++		return;
++	}
++	qmi->cold_boot_state = ATH12K_QMI_COLD_BOOT_WAIT_CAL;
++	spin_unlock_irqrestore(&qmi->cold_boot_lock, flags);
++
++	ret = ath12k_qmi_wlanfw_mode_send(ab,
++					  ATH12K_FIRMWARE_MODE_CALIBRATION);
++	if (ret) {
++		ath12k_warn(ab, "coldboot mode request failed: %d\n", ret);
++		goto fail;
++	}
++
++	ath12k_info(ab, "coldboot mode 7 accepted; waiting for CAL_DONE\n");
 +	timeout = wait_for_completion_timeout(&qmi->cal_done_completion,
 +					      msecs_to_jiffies(ATH12K_COLD_BOOT_TIMEOUT_MS));
-+	if (!timeout) {
-+		ath12k_warn(ab, "coldboot calibration timed out\n");
-+		qmi->cal_timeout = true;
-+	}
 +
-+	if (qmi->cold_boot_cancelled)
++	spin_lock_irqsave(&qmi->cold_boot_lock, flags);
++	if (qmi->cold_boot_cancelled) {
++		spin_unlock_irqrestore(&qmi->cold_boot_lock, flags);
 +		return;
-+
-+	if (!qmi->cal_done && !qmi->cal_timeout) {
-+		/* A completion without CAL_DONE must not keep the firmware
-+		 * in calibration mode forever.
-+		 */
-+		qmi->cal_timeout = true;
 +	}
 +
++	if (qmi->cal_done && qmi->caldb_valid) {
++		success = true;
++	} else {
++		qmi->cal_timeout = true;
++		ath12k_qmi_cold_boot_invalidate_caldb_locked(qmi);
++	}
++	qmi->cold_boot_state = ATH12K_QMI_COLD_BOOT_RESET;
++	spin_unlock_irqrestore(&qmi->cold_boot_lock, flags);
++
++	if (!success && !timeout)
++		ath12k_warn(ab, "coldboot calibration timed out\n");
++	else if (!success)
++		ath12k_warn(ab, "coldboot CAL_DONE without a valid CALDB\n");
++
++	goto reset;
++
++fail:
++	spin_lock_irqsave(&qmi->cold_boot_lock, flags);
++	if (qmi->cold_boot_cancelled) {
++		spin_unlock_irqrestore(&qmi->cold_boot_lock, flags);
++		return;
++	}
++	qmi->cal_timeout = true;
++	ath12k_qmi_cold_boot_invalidate_caldb_locked(qmi);
++	qmi->cold_boot_state = ATH12K_QMI_COLD_BOOT_RESET;
++	spin_unlock_irqrestore(&qmi->cold_boot_lock, flags);
++
++reset:
 +	/* Keep target_mem[] mapped: the CALDB DMA buffer holds the
 +	 * calibration result consumed by the mission-mode boot.
 +	 */
-+	ath12k_info(ab, "restarting firmware in mission mode after coldboot\n");
++	ath12k_info(ab, "restarting firmware after coldboot (%s)\n",
++		    success ? "calibrated" : "fallback");
 +	ath12k_qmi_firmware_stop(ab);
 +	ath12k_hif_power_down(ab, false);
 +
-+	if (qmi->cold_boot_cancelled)
++	if (READ_ONCE(qmi->cold_boot_cancelled))
 +		return;
++
++	spin_lock_irqsave(&qmi->cold_boot_lock, flags);
++	qmi->cold_boot_state = success ?
++		ATH12K_QMI_COLD_BOOT_COMPLETE : ATH12K_QMI_COLD_BOOT_FAILED;
++	spin_unlock_irqrestore(&qmi->cold_boot_lock, flags);
 +
 +	ret = ath12k_hif_power_up(ab);
 +	if (ret)
@@ -193,19 +336,33 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
 +
 +void ath12k_qmi_schedule_cold_boot(struct ath12k_base *ab)
 +{
-+	if (!ab->qmi.cold_boot_cal || ab->qmi.cal_done ||
-+	    ab->qmi.cal_timeout)
++	unsigned long flags;
++
++	spin_lock_irqsave(&ab->qmi.cold_boot_lock, flags);
++	if (!ab->qmi.cold_boot_cal ||
++	    ab->qmi.cold_boot_state != ATH12K_QMI_COLD_BOOT_IDLE) {
++		spin_unlock_irqrestore(&ab->qmi.cold_boot_lock, flags);
 +		return;
++	}
++	spin_unlock_irqrestore(&ab->qmi.cold_boot_lock, flags);
 +
 +	queue_work(system_wq, &ab->qmi.cold_boot_work);
 +}
 +
 +void ath12k_qmi_cancel_cold_boot(struct ath12k_base *ab)
 +{
++	unsigned long flags;
++
 +	if (!ab->qmi.ab)
 +		return;
 +
++	spin_lock_irqsave(&ab->qmi.cold_boot_lock, flags);
 +	ab->qmi.cold_boot_cancelled = true;
++	if (ab->qmi.cold_boot_state < ATH12K_QMI_COLD_BOOT_COMPLETE)
++		ab->qmi.cold_boot_state = ATH12K_QMI_COLD_BOOT_CANCELLED;
++	spin_unlock_irqrestore(&ab->qmi.cold_boot_lock, flags);
++
++	complete_all(&ab->qmi.fw_ready_completion);
 +	complete_all(&ab->qmi.cal_done_completion);
 +	cancel_work_sync(&ab->qmi.cold_boot_work);
 +}
@@ -213,7 +370,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  static int
  ath12k_qmi_driver_event_post(struct ath12k_qmi *qmi,
  			     enum ath12k_qmi_event_type type,
-@@ -3683,6 +3820,9 @@
+@@ -3683,6 +3936,9 @@
  
  		if (!(ab && ab->qmi.num_radios != U8_MAX))
  			return false;
@@ -223,7 +380,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  	}
  
  	return true;
-@@ -3729,6 +3869,11 @@
+@@ -3729,6 +3985,11 @@
  		return ret;
  	}
  
@@ -235,7 +392,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  	spin_lock(&qmi->event_lock);
  
  	ath12k_qmi_set_event_block(qmi, true);
-@@ -3884,6 +4029,28 @@
+@@ -3884,6 +4145,49 @@
  	ath12k_qmi_driver_event_post(qmi, ATH12K_QMI_EVENT_FW_READY, NULL);
  }
  
@@ -248,23 +405,44 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
 +					      handle);
 +	struct ath12k_base *ab = qmi->ab;
 +	const struct wlfw_cal_done_ind_msg_v01 *ind = data;
++	unsigned long flags;
++	int idx, ret = 0;
 +
 +	ath12k_dbg(ab, ATH12K_DBG_QMI,
 +		   "qmi coldboot calibration done, cal file size %llu\n",
 +		   ind->cal_file_upload_size_valid ?
 +		   (unsigned long long)ind->cal_file_upload_size : 0ULL);
 +
-+	if (!qmi->cold_boot_cal || qmi->cal_done)
-+		return;
++	spin_lock_irqsave(&qmi->cold_boot_lock, flags);
++	if (!qmi->cold_boot_cal || qmi->cal_done ||
++	    qmi->cal_timeout ||
++	    qmi->cold_boot_state != ATH12K_QMI_COLD_BOOT_WAIT_CAL)
++		goto out;
 +
++	idx = ath12k_qmi_cold_boot_find_caldb(qmi);
++	if (idx < 0) {
++		qmi->cal_timeout = true;
++		complete_all(&qmi->cal_done_completion);
++		ret = -EINVAL;
++		goto out;
++	}
++
++	qmi->caldb_idx = idx;
++	qmi->caldb_size = qmi->target_mem[idx].size;
++	qmi->caldb_paddr = qmi->target_mem[idx].paddr;
++	qmi->caldb_valid = true;
 +	qmi->cal_done = 1;
 +	complete(&qmi->cal_done_completion);
++out:
++	spin_unlock_irqrestore(&qmi->cold_boot_lock, flags);
++	if (ret)
++		ath12k_warn(ab, "coldboot CAL_DONE ignored: no single retained CALDB target-memory segment\n");
 +}
 +
  static const struct qmi_msg_handler ath12k_qmi_msg_handlers[] = {
  	{
  		.type = QMI_INDICATION,
-@@ -3906,6 +4073,13 @@
+@@ -3906,6 +4210,13 @@
  		.decoded_size = sizeof(struct qmi_wlanfw_fw_ready_ind_msg_v01),
  		.fn = ath12k_qmi_msg_fw_ready_cb,
  	},
@@ -278,32 +456,40 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  
  	/* end of list */
  	{},
-@@ -4014,6 +4188,12 @@
+@@ -4014,6 +4325,11 @@
  				break;
  			}
  
 +			if (ath12k_qmi_cold_boot_pending(ab)) {
-+				if (!ab->qmi.cold_boot_started)
-+					ath12k_qmi_process_coldboot_calibration(ab);
++				complete(&ab->qmi.fw_ready_completion);
 +				break;
 +			}
 +
  			clear_bit(ATH12K_FLAG_CRASH_FLUSH,
  				  &ab->dev_flags);
  			ret = ath12k_core_qmi_firmware_ready(ab);
-@@ -4046,6 +4226,11 @@
+@@ -4046,6 +4362,20 @@
  	memset(&ab->qmi.target, 0, sizeof(struct target_info));
  	memset(&ab->qmi.target_mem, 0, sizeof(struct target_mem_chunk));
  	ab->qmi.ab = ab;
++	spin_lock_init(&ab->qmi.cold_boot_lock);
++	init_completion(&ab->qmi.fw_ready_completion);
 +	init_completion(&ab->qmi.cal_done_completion);
++	ab->qmi.cold_boot_state = ATH12K_QMI_COLD_BOOT_IDLE;
 +	ab->qmi.cold_boot_cancelled = false;
++	ab->qmi.cal_done = 0;
++	ab->qmi.cal_timeout = false;
++	ab->qmi.caldb_valid = false;
++	ab->qmi.caldb_idx = -1;
++	ab->qmi.caldb_size = 0;
++	ab->qmi.caldb_paddr = 0;
 +	ab->qmi.cold_boot_cal = ath12k_cold_boot_cal &&
 +		ab->target_mem_mode == ATH12K_QMI_MEMORY_MODE_DEFAULT &&
 +		ab->hw_rev == ATH12K_HW_QCN9274_HW20;
  
  	ab->qmi.target_mem_mode = ab->target_mem_mode;
  	ret = qmi_handle_init(&ab->qmi.handle, ATH12K_QMI_RESP_LEN_MAX,
-@@ -4064,6 +4249,7 @@
+@@ -4064,6 +4394,7 @@
  	INIT_LIST_HEAD(&ab->qmi.event_list);
  	spin_lock_init(&ab->qmi.event_lock);
  	INIT_WORK(&ab->qmi.event_work, ath12k_qmi_driver_event_work);
@@ -311,7 +497,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  
  	ret = qmi_add_lookup(&ab->qmi.handle, QMI_SERVICE_ID_WLFW,
  			     ATH12K_QMI_WLFW_SERVICE_VERS_V01,
-@@ -4082,6 +4268,7 @@
+@@ -4082,6 +4413,7 @@
  	if (!ab->qmi.ab)
  		return;
  
@@ -342,7 +528,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
  
  #define ATH12K_BOARD_ID_DEFAULT	0xFF
  
-@@ -132,6 +136,11 @@
+@@ -132,6 +136,20 @@
  	u64 size;
  };
  
@@ -351,23 +537,40 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
 +	u64 cal_file_upload_size;
 +};
 +
++enum ath12k_qmi_cold_boot_state {
++	ATH12K_QMI_COLD_BOOT_IDLE,
++	ATH12K_QMI_COLD_BOOT_WAIT_CAL,
++	ATH12K_QMI_COLD_BOOT_RESET,
++	ATH12K_QMI_COLD_BOOT_COMPLETE,
++	ATH12K_QMI_COLD_BOOT_FAILED,
++	ATH12K_QMI_COLD_BOOT_CANCELLED,
++};
++
  struct ath12k_qmi {
  	struct ath12k_base *ab;
  	struct qmi_handle handle;
-@@ -146,6 +155,12 @@
+@@ -146,6 +164,20 @@
  	u32 target_mem_mode;
  	bool target_mem_delayed;
  	u8 cal_done;
 +	bool cal_timeout;
 +	bool cold_boot_cal;
-+	bool cold_boot_started;
++	enum ath12k_qmi_cold_boot_state cold_boot_state;
 +	bool cold_boot_cancelled;
++	struct completion fw_ready_completion;
 +	struct completion cal_done_completion;
 +	struct work_struct cold_boot_work;
++	spinlock_t cold_boot_lock; /* protects the coldboot result fields */
++
++	/* protected with struct ath12k_qmi::cold_boot_lock */
++	bool caldb_valid;
++	int caldb_idx;
++	u32 caldb_size;
++	dma_addr_t caldb_paddr;
  
  	/* protected with struct ath12k_qmi::event_lock */
  	bool block_event;
-@@ -645,6 +660,9 @@
+@@ -645,6 +677,9 @@
  int ath12k_qmi_init_service(struct ath12k_base *ab);
  void ath12k_qmi_free_resource(struct ath12k_base *ab);
  void ath12k_qmi_trigger_host_cap(struct ath12k_base *ab);

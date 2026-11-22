@@ -77,15 +77,20 @@ From the initramfs:
 
 ```sh
 cat /proc/mtd
+rootfs_mtd=$(awk '$4 ~ /rootfs/ { gsub(/[^0-9]/, "", $1); print $1 }' /proc/mtd)
+[ -n "$rootfs_mtd" ] || { echo "rootfs MTD not found"; exit 1; }
+rootfs_dev=/dev/mtd${rootfs_mtd}
+echo "rootfs MTD: $rootfs_dev"
+
 nanddump -f /tmp/mtd2.bin  /dev/mtd2      # MIBIB
 nanddump -f /tmp/mtd17.bin /dev/mtd17     # APPSBLENV
 nanddump -f /tmp/mtd18.bin /dev/mtd18     # APPSBL
 nanddump -f /tmp/mtd19.bin /dev/mtd19     # APPSBL_1  (never dumped before)
 nanddump -f /tmp/mtd20.bin /dev/mtd20     # ART
 nanddump -f /tmp/mtd21.bin /dev/mtd21     # ETHPHYFW
-dd if=/dev/mtd24 of=/tmp/mtd24.bin bs=128k   # whole UBI area
-dd if=/dev/mtd25 of=/tmp/mtd25.bin bs=64k    # bdata
-sha256sum /tmp/mtd*.bin
+dd if="$rootfs_dev" of=/tmp/rootfs-ubi.bin bs=128k   # whole UBI area
+dd if=/dev/mtd25 of=/tmp/mtd25.bin bs=64k            # bdata
+sha256sum /tmp/mtd*.bin /tmp/rootfs-ubi.bin
 ```
 
 If `nanddump` is not in the initramfs, substitute
@@ -112,18 +117,42 @@ Still in the initramfs, fetch `factory.ubi` (17,039,360 bytes) to `/tmp`:
 ```sh
 # PC push, or wget from a local HTTP server
 nc -l -p 9001 > /tmp/factory.ubi
-sha256sum /tmp/factory.ubi   # must be edbe63e5fb1b6b53d2bbb207b928be959f0efa2c06a86cc90a55d56628093526
+sha256sum /tmp/factory.ubi   # must be 1e67a19687c5d699c98fb7ea2e4d55af773fdd2db1bd5b2679bc4d8c49cc7223
 ```
 
-Write only the `rootfs` mtd:
+Resolve the `rootfs` mtd by name, then detach any UBI that the bootloader's
+`ubi.mtd=rootfs` command line attached during the initramfs boot:
 
 ```sh
-ubiformat /dev/mtd24 -y -f /tmp/factory.ubi
+rootfs_mtd=$(awk '$4 ~ /rootfs/ { gsub(/[^0-9]/, "", $1); print $1 }' /proc/mtd)
+[ -n "$rootfs_mtd" ] || { echo "rootfs MTD not found"; exit 1; }
+rootfs_dev=/dev/mtd${rootfs_mtd}
+echo "rootfs MTD: $rootfs_dev"
+
+if [ -e /sys/class/mtd/mtd${rootfs_mtd}/ubi_num ]; then
+    ubidetach -m "$rootfs_mtd" || { echo "UBI detach failed"; exit 1; }
+fi
+[ ! -e /sys/class/mtd/mtd${rootfs_mtd}/ubi_num ] ||
+    { echo "UBI still attached"; exit 1; }
+if grep -qE "(${rootfs_dev}( |$)|ubi[0-9]+_|ubiblock[0-9]+_)" /proc/mounts; then
+    echo "rootfs UBI is mounted"; exit 1
+fi
 ```
 
-`ubiformat` erases the 190 MiB area and creates `kernel` (vol 0),
-`rootfs` (vol 1); `rootfs_data` is created on first boot. Do **not** use
-`nand write` for a UBI image, and do not touch mtd0–mtd23.
+If `ubidetach -m` is unavailable, stop and resolve the attached UBI with
+`ubinfo -a` and `/sys/class/mtd/mtd${rootfs_mtd}/ubi_num` before writing.
+Do not run `ubiformat` while the existing UBI is attached or mounted.
+
+Write only the resolved `rootfs` mtd:
+
+```sh
+ubiformat "$rootfs_dev" -y -f /tmp/factory.ubi
+```
+
+`ubiformat` erases the 190 MiB area and writes the image's three volumes:
+`kernel` (vol 0), `rootfs` (vol 1), and an autoresizing `rootfs_data`
+(vol 2). OpenWrt uses and resizes `rootfs_data` on first boot. Do **not**
+use `nand write` for a UBI image, and do not touch any other mtd.
 
 Reboot. Expected: U-Boot `bootipq` reads the `kernel` volume, the kernel
 cmdline ends with `root=/dev/ubiblock0_1`, and OpenWrt reaches the login
@@ -197,4 +226,5 @@ after writing.
 - Do not flash `BE10000_Uboot_MIBIB_v2.zip`.
 - Do not treat the last ~1 MB of mtd18 as a backup image; it is residual.
 - Do not `nand write` a raw UBI image.
-- Do not `ubiformat` any mtd other than `rootfs` (mtd24).
+- Do not `ubiformat` any mtd other than the one resolved as `rootfs`
+  (usually mtd24).

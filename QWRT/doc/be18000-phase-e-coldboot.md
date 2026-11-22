@@ -22,13 +22,22 @@ It implements:
 
 - `QMI_WLFW_CAL_DONE_IND_V01` (`0x003e`) with the vendor TLV layout.
 - Calibration mode 7 after the first `FW_READY` indication.
-- A per-radio completion and a separate work item for the CAL_DONE wait,
-  so the hardware-group mutex is never held while QMI target-memory
-  allocation runs.
-- CALDB target-memory DMA lifetime across the firmware reset; the
-  mission-mode boot reuses the same chunks.
+- Separate firmware-ready and CAL_DONE completions.  The hardware-group
+  mutex is never held while QMI target-memory allocation runs.
+- The 60-second CAL_DONE deadline starts only after firmware accepts
+  mode 7; firmware discovery, memory negotiation and BDF transfer do not
+  consume the calibration budget.
+- The restart worker consumes a result that arrived before it was
+  scheduled and always performs OFF/power-down/power-up, including the
+  mode-request-failure fallback.
+- CAL_DONE is accepted only for the active `WAIT_CAL` attempt with a
+  single retained CALDB target-memory chunk.  Late, pre-mode, duplicate
+  or CALDB-less indications cannot set `cal_done`.
+- CALDB target-memory DMA lifetime across the firmware reset; a mission
+  request that would change its index, size, physical address or backing
+  is rejected and invalidates the result.
 - `WLAN_MODE_OFF`, HIF power-down, HIF power-up and a second `HOST_CAP`
-  carrying `cal_done=1`.
+  carrying `cal_done=1` only while the retained CALDB is valid.
 - MLO capability suppressed in the coldboot `HOST_CAP` and advertised
   only after every radio has completed calibration.
 - Group host-cap negotiation is deferred while any radio is still
@@ -37,6 +46,11 @@ It implements:
 - A 60-second CAL_DONE timeout with a mission-mode fallback.
 - Cancellation before HIF teardown and QMI handle release.
 - Gating on QCN9274 hw2.0 and the default (DMA) target-memory mode.
+
+Offline event-ordering checks live in
+`QWRT/tests/test_coldboot_ordering.py` and cover fast CAL_DONE, the
+post-mode-7 deadline, late and CALDB-less indications, mode-request
+failure, and CALDB replacement rejection.
 
 The fixed-memory target path remains excluded because
 `CALDB_MEM_REGION_TYPE` has no reserved-memory region there; only the

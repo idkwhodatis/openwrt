@@ -36,8 +36,9 @@ working system and the installer-supplied QSDK13 image.
   PCS/XPCS, AQR113C and PPE ports `lan1`-`lan4`/`wan`, plus
   pcie1/2/3 QCN9224 nodes with the `_live_1/_2/_4` variants and the
   three-node WSI ring. SFP port 6 is staged disabled. Phase E
-  coldboot remains a hardware-gated patch series. Full hashes and
-  inspection output are in the
+  coldboot is implemented behind `ath12k.cold_boot_cal=1` (default off)
+  and still needs hardware validation. Full hashes and inspection
+  output are in the
   [offline build manifest](be18000-phase-a-build-manifest.md).
   This is not yet a hardware result; serial/RAM boot, PCIe enumeration
   and PHY probe are next.
@@ -57,8 +58,11 @@ working system and the installer-supplied QSDK13 image.
   profile, not the modified SKY85798 profile.
 - QWRT runs cold-boot calibration. The three `/data/vendor/wifi` cache files are
   zero-filled placeholders, not calibration. Backports 7.2 ath12k does **not**
-  implement the verified QSDK PCI mode-7 sequence. Its PCI path can return a DMA
-  address for a requested CALDB segment. See the [mode and memory trace](be10000-be18000-openwrt-gap-rounds.md#pci3-mode-7-caldb-handoff-and-return-to-service).
+  implement the verified QSDK PCI mode-7 sequence by default; mac80211 patch
+  701 adds it behind `ath12k.cold_boot_cal=1`, and its PCI path retains the DMA
+  address for the requested CALDB segment across the reset. See the
+  [mode and memory trace](be10000-be18000-openwrt-gap-rounds.md#pci3-mode-7-caldb-handoff-and-return-to-service)
+  and [Phase E status](be18000-phase-e-coldboot.md).
   See the [PCI3 board selection and calibration trace](be10000-be18000-openwrt-gap-rounds.md#pci3-6-ghz-board-selection-and-cold-boot-calibration).
 - The live 10G PHY is **Aquantia AQR113C**. `0:ETHPHYFW` is an MBN-wrapped Xiaomi
   AQR v5.6.7 firmware image loaded by U-Boot; the 0x28/0x60002 nvmem slice is

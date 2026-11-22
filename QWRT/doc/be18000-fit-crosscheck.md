@@ -10,9 +10,9 @@ Build outputs under `QWRT/extracted/be18000-build/` (recorded in
 
 | File | SHA-256 |
 |---|---|
-| `...-initramfs-uImage.itb` | `375c052173d3e79ae3b3b81b2d0b683a26ec08449d80cba316e5836d99575d71` |
-| `...-squashfs-factory.ubi` | `1de5f9cac693c49f1cd6eb821e7043975c17145c413e20278dcda9dd0bf7075b` |
-| `...-squashfs-sysupgrade.bin` | `ffa96679a556d75e7ef0bb8f8cfc9aeb9996ceb9900becd700e0de187bced88b` |
+| `...-initramfs-uImage.itb` | `4ee42107b119f6e995ccf20851b68913b649ded5fd16b786c0bb597bdda935f8` |
+| `...-squashfs-factory.ubi` | `1e67a19687c5d699c98fb7ea2e4d55af773fdd2db1bd5b2679bc4d8c49cc7223` |
+| `...-squashfs-sysupgrade.bin` | `b0a42e16e6c2ce3c491ea2818ff94b48da9fb4a9219ef2189e9ec54d7cb88e24` |
 
 Live reference: `QWRT/extracted/live-be18000/firmware/live-kernel.fit`.
 
@@ -88,9 +88,9 @@ passes `root=mtd:ubi_rootfs`.
 UBI volumes in `factory.ubi`:
 
 ```text
-volume 0 "kernel"  48 LEBs
-volume 1 "rootfs"  80 LEBs
-(no rootfs_data; OpenWrt creates it on first boot)
+volume 0 "kernel"      48 LEBs
+volume 1 "rootfs"      80 LEBs
+volume 2 "rootfs_data" 0 data LEBs, autoresize
 ```
 
 The live unit has `kernel`, `rootfs`, `rootfs_data`, and
