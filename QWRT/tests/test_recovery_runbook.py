@@ -35,9 +35,15 @@ def main():
     assert match.group(1) == digest, "runbook factory.ubi digest is stale"
 
     assert "/sys/class/ubi/ubi*/mtd_num" in text
-    assert 'ubidetach -d "${ubi_dev#ubi}"' in text
     assert "/sys/class/mtd/mtd${rootfs_mtd}/ubi_num" not in text
+    mount_check = ("/dev/(ubi${ubi_num}_[0-9]+|ubiblock${ubi_num}_[0-9]+|"
+                   "mtd${rootfs_mtd})([[:space:]]|$)|ubi${ubi_num}:")
+    assert mount_check in text
+    assert (text.index(mount_check) <
+            text.index('ubidetach -d "$ubi_num"')), \
+        "UBI mount check must run before detach"
     assert "rootfs UBI is mounted" in text
+    assert "ubi[0-9]+_" not in text
     assert "rootfs_data" in text and "(vol 2)" in text
     assert "edbe63e5fb1b6b53d2bbb207b928be959f0efa2c06a86cc90a55d56628093526" not in text
 

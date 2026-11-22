@@ -140,8 +140,12 @@ for f in /sys/class/ubi/ubi*/mtd_num; do
 done
 
 if [ -n "$ubi_dev" ]; then
+    ubi_num=${ubi_dev#ubi}
+    if grep -qE "/dev/(ubi${ubi_num}_[0-9]+|ubiblock${ubi_num}_[0-9]+|mtd${rootfs_mtd})([[:space:]]|$)|ubi${ubi_num}:" /proc/mounts; then
+        echo "rootfs UBI is mounted on $ubi_dev; stop"; exit 1
+    fi
     echo "detaching $ubi_dev from mtd${rootfs_mtd}"
-    ubidetach -d "${ubi_dev#ubi}" || { echo "UBI detach failed"; exit 1; }
+    ubidetach -d "$ubi_num" || { echo "UBI detach failed"; exit 1; }
 fi
 
 for f in /sys/class/ubi/ubi*/mtd_num; do
@@ -151,8 +155,8 @@ for f in /sys/class/ubi/ubi*/mtd_num; do
     fi
 done
 
-if grep -qE "(${rootfs_dev}( |$)|ubi[0-9]+_|ubiblock[0-9]+_)" /proc/mounts; then
-    echo "rootfs UBI is mounted"; exit 1
+if grep -qE "/dev/mtd${rootfs_mtd}([[:space:]]|$)" /proc/mounts; then
+    echo "rootfs MTD is mounted; stop"; exit 1
 fi
 ```
 
