@@ -61,6 +61,7 @@ ssh root@10.10.10.1 'cat /proc/iomem /proc/meminfo; for f in /sys/class/thermal/
 
 - [ ] Identify the candidate commit and build fresh matching initramfs FIT, factory UBI and sysupgrade artifacts. Record their hashes and the owner-supplied board-2 hash. The archived pre-merge images establish an earlier baseline.
 - [ ] Interrupt U-Boot over serial, TFTP the candidate into RAM, reach a serial shell, then demonstrate a return to the original QWRT by power cycle. Capture both boots.
+- [ ] Before the first write, verify the QWRT rootfs UBI backup (`mtd24.bin`, 190 MiB) and read the section 6 restore procedure. A power-cycle return to QWRT is not a substitute for a tested restore of a corrupt rootfs; do not start the first write until the serial/TFTP path and the restore image are both ready.
 - [ ] Confirm RAM root, UBI attachments/mounts and tmpfs headroom. From the RAM boot, follow the MAX runbook for a consistent backup of MIBIB, APPSBLENV, **both** APPSBL copies, ART, ETHPHYFW, bdata and the complete rootfs UBI partition. Extract the transferred archive on the PC, verify every source checksum and independently verify rootfs length. Keep recovery files available offline. [Recovery and first-flash procedure](be18000-recovery-runbook.md)
 
 ## 3. OpenWrt RAM-boot acceptance

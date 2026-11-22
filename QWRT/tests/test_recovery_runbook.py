@@ -34,6 +34,13 @@ def main():
     digest = hashlib.sha256(FACTORY.read_bytes()).hexdigest()
     assert match.group(1) == digest, "runbook factory.ubi digest is stale"
 
+    assert "A2. Restore the QWRT rootfs UBI" in text
+    assert "qwrt-rootfs-ubi.bin" in text
+    assert "10bff534f3dc75ec8ee06a6f3181245dfeee77afffd83b1cf2517e6863ba4e7f" in text
+    assert ('ubiformat "$rootfs_dev" -y -f /tmp/qwrt-rootfs-ubi.bin' in text)
+    assert ("Serial U-Boot prompt or the TFTP RAM boot has not been demonstrated"
+            in text)
+
     envtools = (REPO / "package" / "boot" / "uboot-tools" / "uboot-envtools" /
                 "files" / "qualcommbe_ipq95xx")
     envtext = envtools.read_text(encoding="utf-8")
@@ -101,6 +108,15 @@ def main():
     print(f"ok factory digest {digest}")
     print("ok APPSBLENV fw_env layout")
     print("ok rootfs MTD detach and three-volume checks")
+
+    backup_readme = REPO / "backup" / "be18000-20261122" / "README.md"
+    if backup_readme.exists():
+        btext = backup_readme.read_text(encoding="utf-8")
+        assert ("bc08f017d701c058b8a0800e36b363ca0b622b77d0b85be387eb4fc680822fa1"
+                in btext), "backup README lacks the QWRT kernel-volume digest"
+        assert ("10bff534f3dc75ec8ee06a6f3181245dfeee77afffd83b1cf2517e6863ba4e7f"
+                in btext), "backup README lacks the QWRT rootfs UBI digest"
+        print("ok local backup reverse-path evidence")
 
 
 if __name__ == "__main__":

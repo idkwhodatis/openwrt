@@ -65,7 +65,8 @@ FIT contract (verified in [the FIT cross-check](be18000-fit-crosscheck.md)):
 - TFTP server rooted at the build directory; HTTP/`nc` available for the
   larger `factory.ubi`.
 - Controllable power, and a second terminal capturing the serial log.
-- Keep the MAX `uboot.bin` and `mibib.bin` on the PC as the known-good pair.
+- Keep the MAX `uboot.bin`/`mibib.bin` pair and the verified QWRT rootfs
+  UBI backup (`mtd24.bin`, 190 MiB, SHA-256 `10bff534...`) on the PC.
 
 ## 3. Step 0 — back up before writing anything
 
@@ -314,6 +315,63 @@ sysupgrade -n openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin
 `bootdelay`, then repeat the `tftpboot`/`bootm` from section 3. This works
 even with a corrupt UBI, because the initramfs is loaded into RAM.
 
+**A2. Restore the QWRT rootfs UBI.** Use this when the mainline install does
+not boot.  The first flash writes only `rootfs` (mtd24); it does not touch
+`0:APPSBL`, `0:APPSBL_1`, `0:MIBIB`, `0:ART` or `0:ETHPHYFW`, so the serial
+U-Boot prompt and TFTP boot remain available.
+
+From the serial U-Boot prompt, boot the initramfs in RAM exactly as in
+section 3:
+
+```text
+tftpboot 0x50000000 openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb
+bootm 0x50000000
+```
+
+Serve the verified QWRT rootfs UBI backup from the PC:
+
+```sh
+# PC, from the repository root:
+ncat -l -p 9002 < backup/be18000-20261122/device/mtd/mtd24.bin
+```
+
+In the initramfs, configure the LAN, transfer the image, and verify it:
+
+```sh
+lan_if=lan1
+ip link set "$lan_if" up
+ip addr add 192.168.31.1/24 dev "$lan_if" 2>/dev/null || true
+ping -c 1 192.168.31.100
+
+nc 192.168.31.100 9002 > /tmp/qwrt-rootfs-ubi.bin
+[ "$(wc -c < /tmp/qwrt-rootfs-ubi.bin)" -eq 199229440 ] || {
+    echo "QWRT rootfs UBI restore image is truncated"; exit 1; }
+sha256sum /tmp/qwrt-rootfs-ubi.bin
+# must be 10bff534f3dc75ec8ee06a6f3181245dfeee77afffd83b1cf2517e6863ba4e7f
+```
+
+Resolve and verify the rootfs mtd, detach any UBI attached to it, and
+confirm it is not mounted.  Use the exact block from section 4
+(`rootfs_mtd`, `mtd_size`, `check_mtd`, the `ubi_dev` loop, and the mount
+checks).  Then write only the resolved rootfs mtd:
+
+```sh
+ubiformat "$rootfs_dev" -y -f /tmp/qwrt-rootfs-ubi.bin
+```
+
+Reboot.  Expected: QWRT 21.02-SNAPSHOT `r47708-c3b0518f7e` returns with the
+same U-Boot environment and the original overlay.  The backup's kernel
+volume is byte-identical to the live QWRT kernel FIT; the rootfs volume is a
+valid QWRT squashfs and the `rootfs_data` volume is UBIFS.
+
+If the restore image fails its size or hash check, stop: do not write.  If
+`ubiformat` fails, capture the serial log and do not loop writes.
+
+This restore has not been executed on hardware.  Before the first mainline
+flash, at minimum complete the RAM-boot/power-cycle rehearsal in section 3
+and confirm the serial U-Boot prompt, TFTP server, and this backup are all
+available.
+
 **B. U-Boot web recovery.** Connect the PC at `192.168.31.100/24` and open
 `http://192.168.31.1` for the live environment. If only the built-in default
 answers, change the PC to `192.168.1.100/24` and open `http://192.168.1.1`.
@@ -327,6 +385,11 @@ Confirm which address answers before uploading. Pages: `/index.html`,
 - **ART** page expects exactly 1,310,720 bytes.
 - **Firmware** page is QWRT's own UBI-volume updater; it is **not** a
   `ubiformat` for `factory.ubi`.
+
+One runbook line says the web U-Boot page expects a 1 MiB file, while the
+MAX ZIP's `uboot.bin` is 549,912 bytes.  Resolve that inconsistency before
+relying on the web U-Boot page.  The serial/TFTP path above does not depend
+on it.
 
 **C. From QWRT Linux.** The package readme says:
 
@@ -366,6 +429,10 @@ dd if=/dev/mtd2 bs=256k count=1 2>/dev/null | sha256sum
   proven for this unit.
 - `mtd19` backup missing: do not proceed to any MIBIB/APPSBL write.
 - `factory.ubi` hash mismatch: do not write.
+- Serial U-Boot prompt or the TFTP RAM boot has not been demonstrated:
+  do not write the first rootfs image.
+- QWRT rootfs UBI restore image (`mtd24.bin`) fails its size or SHA-256
+  check: do not write.
 - First boot fails twice: reflash the initramfs, keep the UBI backup, and
   capture the serial log before changing anything else.
 
