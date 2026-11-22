@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenCode <opencode@localhost>
+Date: Sun, 22 Nov 2026 00:00:00 -0500
+Subject: [PATCH] clk: qcom: nsscc-qca8k: honor reset post-deassert delay
+
+The QCA8084 package must settle after its GPIO reset is deasserted
+before the MDIO bus can access the package.  The QSDK qca_mdio_probe()
+drives GPIO60 low for 100-110 ms and then high for another 100-110 ms.
+The upstream NSSCC probe waits before deasserting the reset but returns
+immediately afterwards, so a cold boot can access the package too early.
+
+Read an optional "reset-post-delay-us" property and sleep for that
+interval after releasing the reset.  Boards that need the QSDK timing
+can set it to 100000.  The property is documented in the NSSCC binding.
+
+Signed-off-by: OpenCode <opencode@localhost>
+---
+ Documentation/devicetree/bindings/clock/qcom,qca8k-nsscc.yaml | 4 ++++
+ drivers/clk/qcom/nsscc-qca8k.c                                 | 9 ++++++++-
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+--- a/Documentation/devicetree/bindings/clock/qcom,qca8k-nsscc.yaml
++++ b/Documentation/devicetree/bindings/clock/qcom,qca8k-nsscc.yaml
+@@ -48,7 +48,11 @@ properties:
+   reset-gpios:
+     description: GPIO connected to the chip
+     maxItems: 1
+ 
++  reset-post-delay-us:
++    description:
++      Delay after deasserting reset-gpios before accessing the chip.
++
+ required:
+   - compatible
+   - clocks
+--- a/drivers/clk/qcom/nsscc-qca8k.c
++++ b/drivers/clk/qcom/nsscc-qca8k.c
+@@ -2168,6 +2168,7 @@ static int nss_cc_qca8k_clock_enable_and_reset(struct device *dev)
+ {
+ 	struct gpio_desc *gpiod;
+ 	struct clk *clk;
++	u32 post_delay_us;
+ 
+ 	clk = devm_clk_get_enabled(dev, NULL);
+ 	if (IS_ERR(clk))
+@@ -2179,6 +2180,10 @@ static int nss_cc_qca8k_clock_enable_and_reset(struct device *dev)
+ 	} else if (gpiod) {
+ 		msleep(100);
+ 		gpiod_set_value_cansleep(gpiod, 0);
++		if (!of_property_read_u32(dev->of_node,
++					  "reset-post-delay-us",
++					  &post_delay_us))
++			fsleep(post_delay_us);
+ 	}
+ 
+ 	return 0;
+-- 
+2.43.0

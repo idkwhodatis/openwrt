@@ -52,12 +52,17 @@ Phase B/C source changes:
   four QCA8084 PHYs at `1`-`4`, `pcs-phy@6`, `xpcs-phy@7` with four
   XPCS channel clock/reset sets, and AQR113C at C45 address 0 with the
   `0:ETHPHYFW` nvmem firmware.
-- NSSCC owns the shared GPIO60 reset.  The NSSCC package reference is
-  the SoC CMN PLL `ETH0_50MHZ_CLK`; the four UNIPHY 125 MHz inputs are
-  not wired (`<0>`), and two 312.5 MHz fixed clocks supply the PCS
-  RX/TX roots.  `&mdio` runs at 6.25 MHz.  This follows the working
-  QWRT mainline reference and the QCA8084 binding's 50 MHz input
-  requirement; the real package clock tree remains unverified.
+- NSSCC owns the shared GPIO60 reset.  The board sets
+  `reset-post-delay-us = <100000>` and target patch 0363 makes the
+  driver sleep after deasserting the GPIO, preserving the QSDK
+  100-110 ms assert and 100-110 ms settle intervals.  The NSSCC
+  package reference is the SoC CMN PLL `ETH0_50MHZ_CLK`; the four
+  UNIPHY 125 MHz inputs are not wired (`<0>`), and two 312.5 MHz fixed
+  clocks supply the PCS RX/TX roots.  `&mdio` runs at 6.25 MHz.
+- The 50 MHz parent is supported by the QCA8084 binding, the live QSDK
+  MDIO node covering the CMN PLL block at `0x9b000` with
+  `mdio_clk_fixup`, and the working QWRT mainline reference.  The
+  physical board trace still needs a scope check.
 - Board DTS `&qcom_ppe`: ports 1-4 use PCS0 channels 0-3 and
   `10g-qxgmii`, labels `lan1`-`lan4`; port 5 uses PCS1 channel 0 and
   `usxgmii`, label `wan`.  Port 6/SFP is deferred.
@@ -85,6 +90,12 @@ Review fixes (2026-11-22):
   UNIPHY 125 MHz inputs are not wired (`<0>`), and the MDIO bus runs at
   6.25 MHz.  This matches the working QWRT mainline BE10000 reference
   and the QCA8084 binding.
+- Cold-boot review added the missing GPIO60 settling interval.  The
+  NSSCC node sets `reset-post-delay-us = <100000>` and patch 0363 makes
+  the driver sleep after deasserting the reset, matching the QSDK
+  100-110 ms assert and 100-110 ms settle sequence.  The 50 MHz
+  reference source is retained with the QSDK CMN PLL/MDIO evidence; a
+  board-level scope check remains a hardware gate.
 
 Independent review triage (2026-11-22):
 
@@ -112,11 +123,11 @@ Artifacts are archived under `QWRT/extracted/be18000-build/`.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,104,532 | `20b94f5d801e6ef9d96bb761b63c6e8027544ef0d4bcbd7b5ec196bcc88c2c95` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `642d2acbfe2b4bd306e93a8778679484d3ca7579db8776ac5b75e3f457d32ce7` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `d079d464927543edd1e6a7620d36ae234702a81b70e3af27b2f34c21d3b42b40` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,104,852 | `8a7ada4ac87254ab231a313e9af6ef8b4354ad366550fc367e3939cc46343cf8` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `17d350daa7afa77769229210f60d11e9624e990305f5b966489525991678ff98` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `bf367e97f45adfd4424eb78ec8934be97eb21a1832f3d89538ec295b2ad45aa1` |
 | `openwrt-qualcommbe-ipq95xx-xiaomi_be18000.manifest` | 4,471 | `7f22d11663e8815013c4c01f63caba77cc71fb3d051784193e81a5251d950823` |
-| `profiles.json` | 2,123 | `466096314e74d41626a9c08aa9e346bbb3cb90a6e3936595c8a54205724f1547` |
+| `profiles.json` | 2,123 | `2f9b2e2d2af0d6e6962edd0c459bda98f5788a0ad1f6b5c31e5afd10df6d8df1` |
 | `config.buildinfo` | 152 | `b65255fd8dbd33a196f1aad512d07e5c8a28188de75c82bb25561d2447abc4b3` |
 
 ## FIT inspection
@@ -128,7 +139,7 @@ Both the standalone initramfs FIT and the kernel volume inside
 - Kernel compression: gzip
 - Load/entry: `0x42080000`
 - FDT description: `xiaomi_be18000`
-- FDT size: 42,791 bytes
+- FDT size: 42,827 bytes
 
 The embedded board DTB reports:
 
@@ -149,6 +160,7 @@ Ethernet nodes in the same DTB:
 ```text
 mdio:                okay, 6,250,000 Hz
 QCA8084 NSSCC:       qcom,qca8084-nsscc @ 0x18
+NSSCC reset:         GPIO60 active-low, 100,000 us post-delay
 NSSCC reference:     cmn_pll ETH0_50MHZ_CLK + two 312.5 MHz roots
 QCA8084 package:     qcom,qca8084-package @ 1
 package mode:        0 (PCS1 10G-QXGMII, PCS0 unused)

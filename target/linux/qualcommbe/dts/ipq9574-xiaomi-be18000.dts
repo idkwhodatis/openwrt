@@ -50,10 +50,13 @@
 	};
 
 	/*
-	 * QCA8084 NSSCC reference clocks.  The package reference input is
-	 * the SoC CMN PLL ETH0 50 MHz output; UNIPHY0/1 125 MHz inputs are
-	 * not wired on this board, and the PCS supplies the two 312.5 MHz
-	 * RX/TX roots.  This matches the working QWRT mainline reference.
+	 * QCA8084 NSSCC reference clocks.  The QCA8084 binding requires
+	 * a 50 MHz package reference.  The live QSDK MDIO node covers
+	 * the CMN PLL block at 0x9b000 and uses mdio_clk_fixup, and the
+	 * working QWRT mainline reference feeds the same NSSCC from
+	 * cmn_pll ETH0_50MHZ_CLK.  The physical source still needs a
+	 * board-level scope check.  The four UNIPHY 125 MHz inputs are
+	 * not wired; the PCS supplies the two 312.5 MHz RX/TX roots.
 	 */
 	qca8k_uniphy1_rx312p5m: qca8k-uniphy1-rx312p5m {
 		compatible = "fixed-clock";
@@ -492,6 +495,7 @@
 		compatible = "qcom,qca8084-nsscc";
 		reg = <0x18>;
 		reset-gpios = <&tlmm 60 GPIO_ACTIVE_LOW>;
+		reset-post-delay-us = <100000>;
 		clocks = <&cmn_pll ETH0_50MHZ_CLK>,
 			 <0>,
 			 <0>,

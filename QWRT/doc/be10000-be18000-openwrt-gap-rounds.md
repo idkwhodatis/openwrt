@@ -1363,6 +1363,15 @@ each jack. A warm reboot can preserve bootloader setup. The source trace
 does not establish Xiaomi's minimum reset timing or power-on register
 contents.
 
+**Resolution in the board port.** The NSSCC node sets
+`reset-post-delay-us = <100000>` and target patch 0363 sleeps after
+deasserting GPIO60, preserving the observed 100–110 ms assert and
+100–110 ms settle sequence.  The 50 MHz parent is retained because the
+QCA8084 binding requires a 50 MHz package reference, the live QSDK MDIO
+node covers the CMN PLL block at `0x9b000` and uses `mdio_clk_fixup`,
+and the working QWRT mainline reference uses the same parent.  The
+physical source still needs a board-level scope check.
+
 ## Closing audit (original twenty rounds)
 
 | Check | Result |

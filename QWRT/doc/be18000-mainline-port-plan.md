@@ -229,8 +229,10 @@ The static Ethernet and board-I/O portion of B/C is now in the board
 DTS.  Hardware verification is deliberately deferred:
 
 - `&mdio` is enabled with the QCA8084 NSSCC at MDIO address `0x18`.
-  The NSSCC owns GPIO60 (`reset-gpios`) once; the MDIO bus and PHY
-  package do not take a second reset.
+  The NSSCC owns GPIO60 (`reset-gpios`) once and sets
+  `reset-post-delay-us = <100000>`; patch 0363 sleeps after deassert,
+  preserving the QSDK 100-110 ms assert and 100-110 ms settle
+  intervals.  The MDIO bus and PHY package do not take a second reset.
 - The QCA8084 package is at address 1 with package mode 0
   (PCS1 10G-QXGMII, PCS0 unused), `qcom,phy-addr-fixup = <1 2 3 4 5 6 7>`,
   four PHY children at 1-4, `pcs-phy@6`, and `xpcs-phy@7` with all four
@@ -238,10 +240,10 @@ DTS.  Hardware verification is deliberately deferred:
 - The NSSCC reference input is the SoC CMN PLL `ETH0_50MHZ_CLK`; the
   four UNIPHY 125 MHz inputs are not wired (`<0>`), and two 312.5 MHz
   fixed clocks supply the PCS RX/TX roots.  The MDIO bus runs at
-  6.25 MHz.  These values follow the working QWRT mainline BE10000
-  reference and the QCA8084 binding, but the real package clock tree
-  has not been scoped; probe and rate accuracy remain a hardware
-  check.
+  6.25 MHz.  The 50 MHz choice is supported by the QCA8084 binding,
+  the live QSDK MDIO node covering the CMN PLL block at `0x9b000` with
+  `mdio_clk_fixup`, and the working QWRT mainline reference; the
+  physical board trace still needs a scope check.
 - PPE ports 1-4 use PCS0 channels 0-3, `phy-mode = "10g-qxgmii"` and
   QCA8084 PHY handles 1-4, labels `lan1`-`lan4`.  Port 5 uses PCS1
   channel 0, `usxgmii`, the AQR113C at C45 address 0 with the
