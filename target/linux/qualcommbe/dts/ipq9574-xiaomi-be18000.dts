@@ -99,6 +99,16 @@
 
 	reserved-memory {
 		/*
+		 * TrustZone application RAM from the live QWRT DT.  The
+		 * bootloader hands this window to the TZ application and
+		 * it must never be mapped by Linux.
+		 */
+		tzapp: tzapp@49B00000 {
+			no-map;
+			reg = <0x0 0x49B00000 0x0 0x00600000>;
+		};
+
+		/*
 		 * QCN9224 host DDR windows from the live QWRT DT.  Each
 		 * radio owns 50 MiB; the caldb window is the upper 8 MiB
 		 * at +0x1e00000 and is described only when the cold-boot

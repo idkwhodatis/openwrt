@@ -28,10 +28,12 @@ working system and the installer-supplied QSDK13 image.
 - Phase A/B/C has an offline `qualcommbe/ipq95xx` image for
   `xiaomi,be18000`: FIT `config@al02-c4`, gzip `0x42080000`, UBI
   `kernel`/`rootfs`/`rootfs_data`, the live 292,256-byte Xiaomi board-2,
-  and the live MIBIB partition table. The DTB also stages the QCA8084
-  package/NSSCC, QCA8084 PHYs 1-4, PCS/XPCS, AQR113C and PPE ports
-  `lan1`-`lan4`/`wan`; SFP remains deferred. Full hashes and inspection
-  output are in the
+  and the live MIBIB partition table. The DTB also stages the live
+  `tzapp` reservation, QCA8084 package/NSSCC, QCA8084 PHYs 1-4,
+  PCS/XPCS, AQR113C and PPE ports `lan1`-`lan4`/`wan`; SFP remains
+  deferred. Sysupgrade accepts only the Xiaomi tar with FIT kernel and
+  squashfs root; raw `factory.ubi` is recovery-only. Full hashes and
+  inspection output are in the
   [offline build manifest](be18000-phase-a-build-manifest.md).
   This is not yet a hardware result; serial/RAM boot and PHY probe are
   next.

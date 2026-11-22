@@ -4,6 +4,45 @@ REQUIRE_IMAGE_METADATA=1
 RAMFS_COPY_BIN='fw_printenv fw_setenv head cmp sha256sum tr mktemp ubiformat ubiattach ubidetach ubimkvol ubirmvol ubinfo nanddump mtd'
 RAMFS_COPY_DATA='/etc/fw_env.config /var/lock/fw_printenv.lock'
 
+be18000_check_sysupgrade() {
+	local image="$1"
+	local board_dir="sysupgrade-xiaomi_be18000"
+	local cmd members member
+
+	# The generated sysupgrade image is an uncompressed or gzip tar.
+	# A raw factory.ubi has the UBI magic and must never reach
+	# nand_do_upgrade: it is a ubiformat recovery image.
+	cmd="$(identify_if_gzip "$image")cat"
+	members="$($cmd < "$image" 2>/dev/null | tar tf - 2>/dev/null)" || {
+		echo "BE18000: expected a sysupgrade tar, not a raw recovery image" >&2
+		return 1
+	}
+
+	for member in CONTROL kernel root; do
+		printf '%s\n' "$members" | grep -qx "$board_dir/$member" || {
+			echo "BE18000: missing $board_dir/$member" >&2
+			return 1
+		}
+	done
+
+	[ "$($cmd < "$image" | tar xOf - "$board_dir/CONTROL" 2>/dev/null | wc -c)" -gt 0 ] || {
+		echo "BE18000: empty $board_dir/CONTROL" >&2
+		return 1
+	}
+
+	[ "$(identify_tar "$image" "$cmd" "$board_dir/kernel")" = "fit" ] || {
+		echo "BE18000: kernel is not a FIT image" >&2
+		return 1
+	}
+
+	[ "$(identify_tar "$image" "$cmd" "$board_dir/root")" = "squashfs" ] || {
+		echo "BE18000: root is not a squashfs image" >&2
+		return 1
+	}
+
+	return 0
+}
+
 platform_check_image() {
 	case "$(board_name)" in
 	linksys,ln6001)
@@ -14,9 +53,11 @@ platform_check_image() {
 		return 0
 		;;
 	xiaomi,be18000)
-		# The sysupgrade tar is checked for metadata by the generic
-		# path; the factory.ubi is a ubiformat recovery image and is
-		# deliberately not accepted here.
+		# Only a correctly named sysupgrade tar with a non-empty
+		# CONTROL, FIT kernel and squashfs root may be dispatched to
+		# NAND.  Return 74 so --force cannot bypass this format check.
+		nand_do_platform_check "$(board_name)" "$1" || return 74
+		be18000_check_sysupgrade "$1" || return 74
 		return 0
 		;;
 	*)

@@ -250,13 +250,23 @@ DTS.  Hardware verification is deliberately deferred:
 - `02_network` already maps `lan1`-`lan4` plus `wan`; the DTS labels
   match that mapping.  I2C LM63/EMC2305 nodes and the PWM fan path are
   present from the Phase A board file.
+- The live TrustZone application window `tzapp@49B00000`
+  (6 MiB, `no-map`) is reserved alongside the SoC dtsi's bootloader,
+  SBL, TZ and SMEM reservations.
+- The Xiaomi sysupgrade validator now requires the
+  `sysupgrade-xiaomi_be18000` tar with a non-empty `CONTROL`, FIT kernel
+  and squashfs root.  Any other container, including the raw
+  `factory.ubi` recovery image, returns 74 and cannot be forced through
+  `nand_do_upgrade`.
 
-Offline evidence: the board DTB compiles and contains the enabled MDIO
+Offline evidence: the board DTB compiles and contains the tzapp, MDIO
 bus, NSSCC, QCA8084 package, `qcom,package-mode = <0>`, the 1-7 address
 fixup, PCS/XPCS clock and reset sets, and port labels/modes
-`lan1`-`lan4`/`10g-qxgmii` and `wan`/`usxgmii`.  **Not verified:** PHY
-ID register reads at 1-4, package probe, clock/reset programming, AQR
-10G link, negotiated 2.5G/10G rates, fan response, or any traffic.
+`lan1`-`lan4`/`10g-qxgmii` and `wan`/`usxgmii`.  The sysupgrade
+preflight accepts the generated tar and rejects the factory UBI,
+initramfs FIT, truncated tar and a wrong-board tar.  **Not verified:**
+PHY ID register reads at 1-4, package probe, clock/reset programming,
+AQR 10G link, negotiated 2.5G/10G rates, fan response, or any traffic.
 
 
 

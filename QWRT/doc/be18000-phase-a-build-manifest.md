@@ -1,6 +1,6 @@
 # BE18000 mainline OpenWrt: Phase A/B/C offline build manifest
 
-Date: 2026-11-21
+Date: 2026-11-21; review fixes 2026-11-22
 
 This manifest records the successful offline build of the
 `qualcommbe/ipq95xx` image for the modified BE10000 identified as
@@ -32,9 +32,10 @@ Phase A source changes:
   `PAGESIZE=2048`, `SUBPAGESIZE=2048`, `VID_HDR_OFFSET=2048`,
   `IMAGE_SIZE=199229440` (`0xbe00000`).
 - `target/linux/qualcommbe/dts/ipq9574-xiaomi-be18000.dts`: board
-  identity, UART console, `ipq9574_s1` regulator, reserved memory,
-  live MIBIB partitions, ART/ETHPHYFW NVRAM cells, LEDs/buttons, PWM,
-  I2C sensors, ramoops.
+  identity, UART console, `ipq9574_s1` regulator, the live
+  `tzapp@49B00000` (6 MiB, `no-map`) reservation, the three QCN9224
+  host windows, live MIBIB partitions, ART/ETHPHYFW NVRAM cells,
+  LEDs/buttons, PWM, I2C sensors, ramoops.
 - `package/firmware/ipq-wifi-xiaomi-be18000/`: live 292,256-byte
   `board-2.bin` installed through `install-overlay`.
 - `target/linux/qualcommbe/ipq95xx/base-files/etc/board.d/02_network`
@@ -59,17 +60,34 @@ Phase B/C source changes:
   `usxgmii`, label `wan`.  Port 6/SFP is deferred.
 - LAN ports use ART MAC offset +1 and WAN uses offset 0.
 
+Review fixes (2026-11-22):
+
+- Reserved the live TrustZone application window
+  `tzapp@49B00000`, size `0x600000`, with `no-map`.  The SoC dtsi
+  already reserves bootloader, SBL and TZ regions; this adds the
+  missing TZ application hand-off window.
+- `platform_check_image` for `xiaomi,be18000` now requires the
+  `sysupgrade-xiaomi_be18000` tar with non-empty `CONTROL`, a FIT
+  kernel and a squashfs root.  `nand_do_platform_check` verifies the
+  archive first; any other container returns 74, so `sysupgrade -F`
+  cannot dispatch a raw `factory.ubi` recovery image to NAND.
+- Added the tracked buildroot seed
+  `target/linux/qualcommbe/ipq95xx/xiaomi_be18000.config` and
+  documented feeds plus the owner-supplied board-2 prerequisite for a
+  build from a fresh directory.
+
 ## Artifacts
 
 Artifacts are archived under `QWRT/extracted/be18000-build/`.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,103,892 | `642bbc2fc34c155be04b23a2f648a26f1ebf15d352778c79f06e5a226b55f41c` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `14d5fce6e884ceb6e1b063373fae8659be843c478f948d40d22c7af320b39923` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `3975ea1398ff3785256b3ada179c67f3d8745a51e2ed0eb60ceb236bded1082f` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,104,756 | `df5048c1999838898ff609b8f0318ca5659f6603244ff32a74456cdfe9da7f5e` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `8e73ed08e59c9795acefb6c2f621bcb376e3ac14d1af71d513115c78a43e12e5` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `b0edc89de7ed490548cd7ff154494ae26e427f402aaf80ff795cd48ebdcc47a1` |
 | `openwrt-qualcommbe-ipq95xx-xiaomi_be18000.manifest` | 4,471 | `7f22d11663e8815013c4c01f63caba77cc71fb3d051784193e81a5251d950823` |
-| `profiles.json` | 2,123 | `56e32fe63e431b296bdf23082ac56f4176be745778c352806648a199671cd7ac` |
+| `profiles.json` | 2,123 | `d4403a998368da9e18d0b18141a6bb474eee3f45700213fd76ffc9bad3e3f1cd` |
+| `config.buildinfo` | 152 | `b65255fd8dbd33a196f1aad512d07e5c8a28188de75c82bb25561d2447abc4b3` |
 
 ## FIT inspection
 
@@ -80,7 +98,7 @@ Both the standalone initramfs FIT and the kernel volume inside
 - Kernel compression: gzip
 - Load/entry: `0x42080000`
 - FDT description: `xiaomi_be18000`
-- FDT size: 43,199 bytes
+- FDT size: 43,263 bytes
 
 The embedded board DTB reports:
 
@@ -91,6 +109,7 @@ chosen bootargs-append: " root=/dev/ubiblock0_1"
 rootfs partition:    rootfs @ 0x1780000, size 0xbe00000
 0:ART nvmem:         mac-base
 0:ETHPHYFW nvmem:    aqr-fw @ 0x28, size 0x60002
+tzapp:               0x49b00000, size 0x600000 (no-map)
 ramoops:             0x4dd00000, size 0x400000
 QCN9224 windows:     0x50f00000 / 0x54100000 / 0x57300000, 0x3200000 each
 ```
@@ -132,7 +151,9 @@ volume:
   with SHA-256
   `0fcbb66e0a229bafc2bad9dd7cc8a5488134f4808673e73cd2808437849ab9e6`.
   This is the live Xiaomi board-2, applied after the official
-  `ath12k-firmware-qcn9274` package.
+  `ath12k-firmware-qcn9274` package.  It is owner-supplied device data
+  and is intentionally not tracked; a fresh build must place and verify
+  it as described under Reproduce.
 - `/lib/firmware/ath12k/QCN9274/hw2.0/firmware-2.bin` is present
   (16,035,896 bytes).
 - `/etc/uci-defaults/30_uboot-envtools` contains the
@@ -159,6 +180,40 @@ kmod-leds-pwm 6.18.60-r1
 
 ## Reproduce
 
+A fresh build needs four inputs: the source at the commit containing
+this manifest, the matching feeds, the owner-supplied board-2 binary,
+and the tracked buildroot seed.  The board-2 binary is deliberately not
+committed while its redistribution rights are unresolved.
+
+```sh
+# 1. Source and feeds.  Check out the commit containing this manifest.
+cd /path/to/openwrt
+./scripts/feeds update -a
+./scripts/feeds install -a
+
+# 2. Owner-supplied board-2 (not tracked).
+cp /path/to/board-live-be18000.qcn9274 \
+   package/firmware/ipq-wifi-xiaomi-be18000/files/board-2.bin
+sha256sum package/firmware/ipq-wifi-xiaomi-be18000/files/board-2.bin
+# Expect 292256 bytes and
+# 0fcbb66e0a229bafc2bad9dd7cc8a5488134f4808673e73cd2808437849ab9e6
+
+# 3. Target/device seed and build.
+cp target/linux/qualcommbe/ipq95xx/xiaomi_be18000.config .config
+make defconfig
+make REVISION=be18000 -j"$(nproc)" V=s
+```
+
+The seed selects target `qualcommbe`, subtarget `ipq95xx`, device
+`xiaomi_be18000`, the initramfs image and `kmod-input-core`;
+`make defconfig` fills in the remaining target, package and image
+defaults.  `REVISION=be18000` keeps the release string stable.  The
+copied WSL tree used for this manifest has no `.git`, so it is mandatory
+there; in a fresh clone it is optional but recommended.
+
+For the copied WSL tree, sync without stale files or host build outputs
+first, then apply steps 2 and 3:
+
 ```sh
 rsync -a --delete \
   --exclude=/.git --exclude=/QWRT --exclude=/qsdk \
@@ -167,6 +222,9 @@ rsync -a --delete \
   --exclude='/build*.log' --exclude='/build*.rc' \
   /path/to/openwrt/ ~/be18000-build/
 cd ~/be18000-build
+cp /path/to/board-live-be18000.qcn9274 \
+   package/firmware/ipq-wifi-xiaomi-be18000/files/board-2.bin
+cp target/linux/qualcommbe/ipq95xx/xiaomi_be18000.config .config
 make defconfig
 make REVISION=be18000 -j"$(nproc)" V=s
 ```
