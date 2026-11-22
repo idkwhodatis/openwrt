@@ -349,10 +349,23 @@ make defconfig
 make REVISION=be18000 -j"$(nproc)" V=s
 ```
 
-The seed selects target `qualcommbe`, subtarget `ipq95xx`, device
-`xiaomi_be18000`, the initramfs image and `kmod-input-core`;
-`make defconfig` fills in the remaining target, package and image
-defaults.  The archived 208-byte `config.buildinfo` is the complete
+Configuration note (2026-11-22): the archived image was built with the
+carried-over `.config` that pins GCC 14.4.0, not with a fresh
+`make defconfig` from the post-merge tree.  A fresh `make defconfig` now
+selects GCC 15.3.0 and adds three new unselected package symbols
+(`ipq-wifi-liteon_wpx8324`, `ipq-wifi-ubnt_unifi-6-pro`,
+`kmod-nf-xtables`), so it will not reproduce the artifact hashes.  For an
+exact rebuild, start from the saved `.config` in
+`backup/be18000-20261122/configs/build/.config` (SHA-256
+`6b93fc07e9b949390003c34a5689ed384172061e038a20d4d1b9809344118cc3`) and
+run the build without `make defconfig`, or select GCC 14.4.0 explicitly.
+The archived image is internally consistent: kernel, modules and userland
+all use GCC 14.4.0.
+
+For a fresh build, the seed selects target `qualcommbe`, subtarget
+`ipq95xx`, device `xiaomi_be18000`, the initramfs image and
+`kmod-input-core`; `make defconfig` fills in the remaining target, package
+and image defaults.  The archived 208-byte `config.buildinfo` is the complete
 non-default diff, not a truncated package list (the copied-tree
 environment emits `CONFIG_GCC_VERSION` twice): `DEVICE_PACKAGES` in
 `target/linux/qualcommbe/image/ipq95xx.mk` supplies the per-device
