@@ -8,8 +8,9 @@ Keep that identity through DTS, firmware selection, image metadata and
 upgrade checks. The stock BE10000 uses a different radio profile.
 QSDK13 is an installer reference. The working 5.4.250 image is the
 behavioral baseline. The Phase A offline build and image-layout
-inspection are complete; see the
-[Phase A build manifest](be18000-phase-a-build-manifest.md). No
+inspection are complete, and the static B/C Ethernet and board-I/O DTS
+is staged. See the
+[offline build manifest](be18000-phase-a-build-manifest.md). No
 hardware gate below has passed yet. Use this sequence to execute the
 port; sections 1–12 preserve the
 earlier design and research, including hypotheses superseded here.
@@ -214,14 +215,52 @@ milestones separately so downstream users know what was tested.
 
 **Next implementation unit:** the serial and RAM-FIT gate of A now has
 an inspected offline image; see the
-[Phase A build manifest](be18000-phase-a-build-manifest.md).  The next
-step is hardware: confirm the serial console, boot the FIT from RAM and
-return to the installed QWRT.  After that, implement the minimal
-UART/clock and one-copper-LAN portion of B.  The latest [live PCI3 verification](be10000-be18000-openwrt-gap-rounds.md#live-verification-of-the-pci3-return-path-and-caldb-mapping)
+[Phase A/B/C build manifest](be18000-phase-a-build-manifest.md).  The
+static B/C Ethernet nodes are staged but unverified.  The next step is
+hardware: confirm the serial console, boot the FIT from RAM, return to
+the installed QWRT, then check QCA8084 PHY IDs at 1-4, package
+probe/link, AQR 10G and fan response.  The latest [live PCI3 verification](be10000-be18000-openwrt-gap-rounds.md#live-verification-of-the-pci3-return-path-and-caldb-mapping)
 and [HOST_CAP trace limits](be10000-be18000-openwrt-gap-rounds.md#can-the-existing-live-traces-recover-the-two-cal_done-tlvs)
 are the evidence baseline for D/E.
 
-### Phase A/B implementation checkpoint (2026-11-21)
+### Phase B/C implementation checkpoint (2026-11-21)
+
+The static Ethernet and board-I/O portion of B/C is now in the board
+DTS.  Hardware verification is deliberately deferred:
+
+- `&mdio` is enabled with the QCA8084 NSSCC at MDIO address `0x18`.
+  The NSSCC owns GPIO60 (`reset-gpios`) once; the MDIO bus and PHY
+  package do not take a second reset.
+- The QCA8084 package is at address 1 with package mode 0
+  (PCS1 10G-QXGMII, PCS0 unused), `qcom,phy-addr-fixup = <1 2 3 4 5 6 7>`,
+  four PHY children at 1-4, `pcs-phy@6`, and `xpcs-phy@7` with all four
+  XPCS channel clock/reset sets.
+- The NSSCC reference inputs are board fixed-clock nodes at 25 MHz
+  (XO), 125 MHz (UNIPHY0/1 RX/TX), and 312.5 MHz (UNIPHY1 RX/TX
+  312P5M).  These frequencies are the documented values used by the
+  upstream NSSCC tables, but the real package clock tree has not been
+  scoped; probe and rate accuracy remain a hardware check.
+- PPE ports 1-4 use PCS0 channels 0-3, `phy-mode = "10g-qxgmii"` and
+  QCA8084 PHY handles 1-4, labels `lan1`-`lan4`.  Port 5 uses PCS1
+  channel 0, `usxgmii`, the AQR113C at C45 address 0 with the
+  `0:ETHPHYFW` nvmem firmware, label `wan`.  All ports use
+  `managed = "in-band-status"`; LAN ports share the ART MAC +1 and WAN
+  uses ART MAC base +0.
+- Port 6/SFP stays out of this checkpoint; it remains Phase 4.
+- `02_network` already maps `lan1`-`lan4` plus `wan`; the DTS labels
+  match that mapping.  I2C LM63/EMC2305 nodes and the PWM fan path are
+  present from the Phase A board file.
+
+Offline evidence: the board DTB compiles and contains the enabled MDIO
+bus, NSSCC, QCA8084 package, `qcom,package-mode = <0>`, the 1-7 address
+fixup, PCS/XPCS clock and reset sets, and port labels/modes
+`lan1`-`lan4`/`10g-qxgmii` and `wan`/`usxgmii`.  **Not verified:** PHY
+ID register reads at 1-4, package probe, clock/reset programming, AQR
+10G link, negotiated 2.5G/10G rates, fan response, or any traffic.
+
+
+
+### Phase A implementation checkpoint (2026-11-21)
 
 The first implementation unit is in the tree:
 
@@ -229,12 +268,12 @@ The first implementation unit is in the tree:
   `Device/xiaomi_be18000` with gzip `Device/FitImage`, `Device/UbiFit`,
   `KERNEL_LOADADDR=0x42080000`, `DEVICE_DTS_CONFIG=config@al02-c4` and
   the live NAND geometry (`BLOCKSIZE=0x20000`, page/subpage 2048,
-  `VID_HDR_OFFSET=2048`, `IMAGE_SIZE=0xbe00000`).
+  `VID_HDR_OFFSET=2048`, `IMAGE_SIZE=199229440`).
 - `target/linux/qualcommbe/dts/ipq9574-xiaomi-be18000.dts` carries the
   `xiaomi,be18000` identity, serial console, reserved-memory, the live
   28-entry MIBIB partition table, `0:ART`/`0:ETHPHYFW` nvmem cells,
   GPIO LEDs/buttons, PWM RGB, LM63/EMC2305 I2C devices and the ramoops
-  reservation. QCA8084/PPE and PCIe/WSI stay staged for the next units.
+  reservation. PCIe/WSI stay staged for the next units.
 - `package/firmware/ipq-wifi-xiaomi-be18000/` installs the live
   `board-2.bin` (292,256 bytes, SHA-256
   `0fcbb66e0a229bafc2bad9dd7cc8a5488134f4808673e73cd2808437849ab9e6`).
@@ -261,12 +300,12 @@ The first implementation unit is in the tree:
   otherwise base-files would carry the invalid APK version
   `...~unknown`.
 - Offline build result: `make REVISION=be18000 -j16 V=s` completed with
-  rc 0.  The 37,881-byte board DTB, FIT `config@al02-c4`, gzip
-  `0x42080000`, UBI `kernel`/`rootfs`/`rootfs_data` with
-  `rootfs_data` autoresize, and the 292,256-byte live board-2
-  (SHA-256 `0fcbb66e...`) are all present in the generated images.
-  Full hashes and inspection output are in the
-  [Phase A build manifest](be18000-phase-a-build-manifest.md).  The
+  rc 0.  The Phase A board DTB (37,881 bytes; 43,199 bytes after the
+  B/C Ethernet nodes), FIT `config@al02-c4`, gzip `0x42080000`, UBI
+  `kernel`/`rootfs`/`rootfs_data` with `rootfs_data` autoresize, and
+  the 292,256-byte live board-2 (SHA-256 `0fcbb66e...`) are all present
+  in the generated images.  Full hashes and inspection output are in
+  the [offline build manifest](be18000-phase-a-build-manifest.md).  The
   next gate is hardware: serial console and RAM FIT boot before any
   NAND write.
 

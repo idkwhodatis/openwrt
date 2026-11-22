@@ -1,18 +1,18 @@
-# BE18000 mainline OpenWrt: Phase A offline build manifest
+# BE18000 mainline OpenWrt: Phase A/B/C offline build manifest
 
 Date: 2026-11-21
 
-This manifest records the first successful offline build of the
+This manifest records the successful offline build of the
 `qualcommbe/ipq95xx` image for the modified BE10000 identified as
-`xiaomi,be18000`.  It is evidence for the source and image-layout gates
-only.  No serial console, RAM boot, NAND write or radio probe has been
-performed.
+`xiaomi,be18000`.  It is evidence for the source, image-layout and
+static board-DTS gates only.  No serial console, RAM boot, NAND write,
+PHY probe or radio probe has been performed.
 
 ## Source and build host
 
 | Item | Value |
 |---|---|
-| Source tree | fork `idkwhodatis/openwrt`, commit `da61e6e6b2` plus the Phase A changes below |
+| Source tree | fork `idkwhodatis/openwrt`, Phase A/B/C implementation |
 | Build host | WSL2 Ubuntu 22.04, `/home/leaf/be18000-build` (case-sensitive ext4) |
 | Target | `qualcommbe`, subtarget `ipq95xx` |
 | Device | `CONFIG_TARGET_qualcommbe_ipq95xx_DEVICE_xiaomi_be18000=y` |
@@ -45,17 +45,31 @@ Phase A source changes:
 - `package/kernel/mac80211/ath.mk`: `kmod-ath12k` declares
   `+kmod-mhi-bus`.
 
+Phase B/C source changes:
+
+- Board DTS `&mdio`: enabled QCA8084 NSSCC at `0x18`, package at `1`,
+  four QCA8084 PHYs at `1`-`4`, `pcs-phy@6`, `xpcs-phy@7` with four
+  XPCS channel clock/reset sets, and AQR113C at C45 address 0 with the
+  `0:ETHPHYFW` nvmem firmware.
+- NSSCC owns the shared GPIO60 reset.  NSSCC reference inputs are fixed
+  clock nodes at 25 MHz XO, 125 MHz UNIPHY0/1 RX/TX and 312.5 MHz
+  UNIPHY1 RX/TX 312P5M; the real package clock tree remains unverified.
+- Board DTS `&qcom_ppe`: ports 1-4 use PCS0 channels 0-3 and
+  `10g-qxgmii`, labels `lan1`-`lan4`; port 5 uses PCS1 channel 0 and
+  `usxgmii`, label `wan`.  Port 6/SFP is deferred.
+- LAN ports use ART MAC offset +1 and WAN uses offset 0.
+
 ## Artifacts
 
 Artifacts are archived under `QWRT/extracted/be18000-build/`.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,098,808 | `3285bc24991cdd536bb5b57a3482f5e6c6f77b3c6d59c156668fa0fdb0d02e84` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `4423af87622efac76c0e8aba1fe24b675f205604878bdb6bfac0348493d6da22` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `aee932fc90e66528bcb618ab0e8deff169078502078d907dccd2131cb40457c3` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,103,892 | `642bbc2fc34c155be04b23a2f648a26f1ebf15d352778c79f06e5a226b55f41c` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `14d5fce6e884ceb6e1b063373fae8659be843c478f948d40d22c7af320b39923` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `3975ea1398ff3785256b3ada179c67f3d8745a51e2ed0eb60ceb236bded1082f` |
 | `openwrt-qualcommbe-ipq95xx-xiaomi_be18000.manifest` | 4,471 | `7f22d11663e8815013c4c01f63caba77cc71fb3d051784193e81a5251d950823` |
-| `profiles.json` | 2,123 | `950f08c649a112d14c24c25ddd240a17e7448bdf45e020b5b78916d8e804fbf2` |
+| `profiles.json` | 2,123 | `56e32fe63e431b296bdf23082ac56f4176be745778c352806648a199671cd7ac` |
 
 ## FIT inspection
 
@@ -66,7 +80,7 @@ Both the standalone initramfs FIT and the kernel volume inside
 - Kernel compression: gzip
 - Load/entry: `0x42080000`
 - FDT description: `xiaomi_be18000`
-- FDT size: 37,881 bytes
+- FDT size: 43,199 bytes
 
 The embedded board DTB reports:
 
@@ -79,6 +93,21 @@ rootfs partition:    rootfs @ 0x1780000, size 0xbe00000
 0:ETHPHYFW nvmem:    aqr-fw @ 0x28, size 0x60002
 ramoops:             0x4dd00000, size 0x400000
 QCN9224 windows:     0x50f00000 / 0x54100000 / 0x57300000, 0x3200000 each
+```
+
+Ethernet nodes in the same DTB:
+
+```text
+mdio:                okay
+QCA8084 NSSCC:       qcom,qca8084-nsscc @ 0x18
+QCA8084 package:     qcom,qca8084-package @ 1
+package mode:        0 (PCS1 10G-QXGMII, PCS0 unused)
+address fixup:       1 2 3 4 5 6 7
+PHYs:                1, 2, 3, 4 (ethernet-phy-id004d.d180)
+PCS/XPCS:            pcs-phy@6, xpcs-phy@7 with four channels
+PPE port 1-4:        lan1-lan4, phy-mode 10g-qxgmii
+PPE port 5:          wan, phy-mode usxgmii
+AQR113C:             C45 address 0, nvmem-cell "firmware"
 ```
 
 ## UBI layout
@@ -147,7 +176,8 @@ make REVISION=be18000 -j"$(nproc)" V=s
 This manifest does **not** establish:
 
 - a successful RAM boot or serial console on the actual unit;
-- Ethernet, QCA8084, AQR113C or SFP operation;
+- QCA8084 package probe, PHY ID reads, clock/reset programming, or
+  2.5G/10G link and traffic (the static DTS nodes are present);
 - PCIe enumeration, board-2 selection or QCN9224 firmware start;
 - cold-boot calibration, 5G/6G operation or MLO;
 - NAND writes, sysupgrade or recovery on hardware.
