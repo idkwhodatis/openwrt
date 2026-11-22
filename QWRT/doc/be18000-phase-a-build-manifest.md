@@ -154,6 +154,22 @@ Phase D/G source changes (2026-11-22):
   state not present in this tree.  Normal mission mode remains the
   default; the coldboot handshake is a hardware-gated patch series.
 
+Phase D-G audit evidence (2026-11-22):
+
+- Kernel config includes `CONFIG_QCOM_WDT=y`,
+  `CONFIG_WATCHDOG_SYSFS=y`, `CONFIG_PSTORE=m`,
+  `CONFIG_PSTORE_RAM=m`, `CONFIG_PSTORE_CONSOLE=y`,
+  `CONFIG_SFP=m`, `CONFIG_AQUANTIA_PHY=y` and `CONFIG_QCA808X_PHY=y`.
+- The image manifest includes `kmod-ath12k`, `kmod-qrtr-mhi`,
+  `kmod-pstore`, `kmod-ramoops`, `kmod-sfp`, `kmod-hwmon-emc2305`,
+  `kmod-hwmon-lm63`, `kmod-leds-pwm`, `kmod-i2c-core` and
+  `wpad-basic-mbedtls`.
+- The DTB contains I2C devices `temperature-sensor@4c` (LM63) and
+  `fan-controller@2f` (EMC2305), the PWM controller, and the
+  `ramoops@4dd00000` reservation.
+- No board-specific wireless/MLO UCI file exists; the WSI graph is
+  DTS-only and MLO remains an opt-in userspace choice.
+
 ## Artifacts
 
 Artifacts are archived under `QWRT/extracted/be18000-build/`.
