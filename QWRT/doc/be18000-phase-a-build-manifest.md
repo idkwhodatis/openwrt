@@ -52,9 +52,12 @@ Phase B/C source changes:
   four QCA8084 PHYs at `1`-`4`, `pcs-phy@6`, `xpcs-phy@7` with four
   XPCS channel clock/reset sets, and AQR113C at C45 address 0 with the
   `0:ETHPHYFW` nvmem firmware.
-- NSSCC owns the shared GPIO60 reset.  NSSCC reference inputs are fixed
-  clock nodes at 25 MHz XO, 125 MHz UNIPHY0/1 RX/TX and 312.5 MHz
-  UNIPHY1 RX/TX 312P5M; the real package clock tree remains unverified.
+- NSSCC owns the shared GPIO60 reset.  The NSSCC package reference is
+  the SoC CMN PLL `ETH0_50MHZ_CLK`; the four UNIPHY 125 MHz inputs are
+  not wired (`<0>`), and two 312.5 MHz fixed clocks supply the PCS
+  RX/TX roots.  `&mdio` runs at 6.25 MHz.  This follows the working
+  QWRT mainline reference and the QCA8084 binding's 50 MHz input
+  requirement; the real package clock tree remains unverified.
 - Board DTS `&qcom_ppe`: ports 1-4 use PCS0 channels 0-3 and
   `10g-qxgmii`, labels `lan1`-`lan4`; port 5 uses PCS1 channel 0 and
   `usxgmii`, label `wan`.  Port 6/SFP is deferred.
@@ -75,6 +78,11 @@ Review fixes (2026-11-22):
   `target/linux/qualcommbe/ipq95xx/xiaomi_be18000.config` and
   documented feeds plus the owner-supplied board-2 prerequisite for a
   build from a fresh directory.
+- Second review corrected the NSSCC parent clocks: the package
+  reference is `&cmn_pll ETH0_50MHZ_CLK`, not the 25 MHz XO; the four
+  UNIPHY 125 MHz inputs are not wired (`<0>`), and the MDIO bus runs at
+  6.25 MHz.  This matches the working QWRT mainline BE10000 reference
+  and the QCA8084 binding.
 
 ## Artifacts
 
@@ -82,11 +90,11 @@ Artifacts are archived under `QWRT/extracted/be18000-build/`.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,104,756 | `df5048c1999838898ff609b8f0318ca5659f6603244ff32a74456cdfe9da7f5e` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `8e73ed08e59c9795acefb6c2f621bcb376e3ac14d1af71d513115c78a43e12e5` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `b0edc89de7ed490548cd7ff154494ae26e427f402aaf80ff795cd48ebdcc47a1` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,104,280 | `a29d2737aa818067658d6791894b7df46df9ae54602f209fe877ac578a3029e6` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `6123fe9801094e282c45e003c2ca96dabbaea6f05e86bde4471343dfa971f4b7` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `e7e9a44c4777e27c3a4e6cc7f4b3f6474a97fa5460358762cb606a7210f50094` |
 | `openwrt-qualcommbe-ipq95xx-xiaomi_be18000.manifest` | 4,471 | `7f22d11663e8815013c4c01f63caba77cc71fb3d051784193e81a5251d950823` |
-| `profiles.json` | 2,123 | `d4403a998368da9e18d0b18141a6bb474eee3f45700213fd76ffc9bad3e3f1cd` |
+| `profiles.json` | 2,123 | `212d11662d4ada8a2936a0a6788f4f57231a648d2ae08764009291aef162fd75` |
 | `config.buildinfo` | 152 | `b65255fd8dbd33a196f1aad512d07e5c8a28188de75c82bb25561d2447abc4b3` |
 
 ## FIT inspection
@@ -98,7 +106,7 @@ Both the standalone initramfs FIT and the kernel volume inside
 - Kernel compression: gzip
 - Load/entry: `0x42080000`
 - FDT description: `xiaomi_be18000`
-- FDT size: 43,263 bytes
+- FDT size: 42,791 bytes
 
 The embedded board DTB reports:
 
@@ -117,8 +125,9 @@ QCN9224 windows:     0x50f00000 / 0x54100000 / 0x57300000, 0x3200000 each
 Ethernet nodes in the same DTB:
 
 ```text
-mdio:                okay
+mdio:                okay, 6,250,000 Hz
 QCA8084 NSSCC:       qcom,qca8084-nsscc @ 0x18
+NSSCC reference:     cmn_pll ETH0_50MHZ_CLK + two 312.5 MHz roots
 QCA8084 package:     qcom,qca8084-package @ 1
 package mode:        0 (PCS1 10G-QXGMII, PCS0 unused)
 address fixup:       1 2 3 4 5 6 7

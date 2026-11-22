@@ -235,11 +235,13 @@ DTS.  Hardware verification is deliberately deferred:
   (PCS1 10G-QXGMII, PCS0 unused), `qcom,phy-addr-fixup = <1 2 3 4 5 6 7>`,
   four PHY children at 1-4, `pcs-phy@6`, and `xpcs-phy@7` with all four
   XPCS channel clock/reset sets.
-- The NSSCC reference inputs are board fixed-clock nodes at 25 MHz
-  (XO), 125 MHz (UNIPHY0/1 RX/TX), and 312.5 MHz (UNIPHY1 RX/TX
-  312P5M).  These frequencies are the documented values used by the
-  upstream NSSCC tables, but the real package clock tree has not been
-  scoped; probe and rate accuracy remain a hardware check.
+- The NSSCC reference input is the SoC CMN PLL `ETH0_50MHZ_CLK`; the
+  four UNIPHY 125 MHz inputs are not wired (`<0>`), and two 312.5 MHz
+  fixed clocks supply the PCS RX/TX roots.  The MDIO bus runs at
+  6.25 MHz.  These values follow the working QWRT mainline BE10000
+  reference and the QCA8084 binding, but the real package clock tree
+  has not been scoped; probe and rate accuracy remain a hardware
+  check.
 - PPE ports 1-4 use PCS0 channels 0-3, `phy-mode = "10g-qxgmii"` and
   QCA8084 PHY handles 1-4, labels `lan1`-`lan4`.  Port 5 uses PCS1
   channel 0, `usxgmii`, the AQR113C at C45 address 0 with the
