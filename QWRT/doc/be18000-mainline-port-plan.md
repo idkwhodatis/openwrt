@@ -313,8 +313,9 @@ does not carry the QSDK coldboot path (`QMI mode 7`, `CAL_DONE`
 indication, CALDB DMA lifetime, OFF/restart, second `HOST_CAP`).  QSDK
 patches 670/703 depend on vendor state that is not present here.  The
 image therefore keeps the normal mission-mode path; the coldboot
-handshake remains a separate hardware-gated patch series.  Do not add
-blank ART or zero-cache caldata as a shortcut.
+handshake remains a separate hardware-gated patch series.  See the
+[Phase E porting brief](be18000-phase-e-coldboot.md).  Do not add blank
+ART or zero-cache caldata as a shortcut.
 
 **Phase F/G audit:** the existing NAND/UBI image and sysupgrade path
 remain the validated offline baseline.  MLO stays opt-in in userspace;

@@ -153,6 +153,7 @@ Phase D/G source changes (2026-11-22):
   `CAL_DONE`/mode-7 lifecycle, and QSDK patches 670/703 depend on vendor
   state not present in this tree.  Normal mission mode remains the
   default; the coldboot handshake is a hardware-gated patch series.
+  See the [Phase E porting brief](be18000-phase-e-coldboot.md).
 
 Phase D-G audit evidence (2026-11-22):
 
