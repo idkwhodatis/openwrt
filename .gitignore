@@ -39,3 +39,6 @@ git-src
 
 QWRT
 qsdk
+
+# Local device/build backups (may contain credentials, MACs and serials)
+/backup/
