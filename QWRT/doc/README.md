@@ -17,6 +17,7 @@ Read the reports in order; later reports refine earlier unknowns:
 11. [BE18000 mainline OpenWrt port plan](be18000-mainline-port-plan.md)
 12. [BE18000 mainline port risk research](be18000-port-risk-research.md)
 13. [BE10000 vs BE18000 QWRT: 20 OpenWrt gap rounds](be10000-be18000-openwrt-gap-rounds.md)
+14. [QWRT U-Boot package analysis (MAX vs v2, live match)](be18000-uboot-package-analysis.md)
 
 The owner's router is the 6 GHz hardware conversion identified by QWRT as
 `xiaomi,be18000`. Start with the [modified-unit source comparison](be10000-be18000-openwrt-gap-rounds.md#owners-modified-be10000-be18000-firmware-profile)
