@@ -255,11 +255,11 @@ DTS.  Hardware verification is deliberately deferred:
 - The live TrustZone application window `tzapp@49B00000`
   (6 MiB, `no-map`) is reserved alongside the SoC dtsi's bootloader,
   SBL, TZ and SMEM reservations.
-- The Xiaomi sysupgrade validator now requires the
-  `sysupgrade-xiaomi_be18000` tar with a non-empty `CONTROL`, FIT kernel
-  and squashfs root.  Any other container, including the raw
-  `factory.ubi` recovery image, returns 74 and cannot be forced through
-  `nand_do_upgrade`.
+- The Xiaomi sysupgrade validator now requires exactly one
+  `sysupgrade-xiaomi_be18000/` directory with a non-empty `CONTROL`,
+  FIT kernel and squashfs root.  Any other container, an ambiguous
+  multi-board tar, or the raw `factory.ubi` recovery image returns 74
+  and cannot be forced through `nand_do_upgrade`.
 
 Offline evidence: the board DTB compiles and contains the tzapp, MDIO
 bus, NSSCC, QCA8084 package, `qcom,package-mode = <0>`, the 1-7 address

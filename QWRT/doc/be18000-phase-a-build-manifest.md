@@ -69,11 +69,12 @@ Review fixes (2026-11-22):
   `tzapp@49B00000`, size `0x600000`, with `no-map`.  The SoC dtsi
   already reserves bootloader, SBL and TZ regions; this adds the
   missing TZ application hand-off window.
-- `platform_check_image` for `xiaomi,be18000` now requires the
-  `sysupgrade-xiaomi_be18000` tar with non-empty `CONTROL`, a FIT
+- `platform_check_image` for `xiaomi,be18000` now requires exactly one
+  `sysupgrade-xiaomi_be18000/` directory with non-empty `CONTROL`, a FIT
   kernel and a squashfs root.  `nand_do_platform_check` verifies the
-  archive first; any other container returns 74, so `sysupgrade -F`
-  cannot dispatch a raw `factory.ubi` recovery image to NAND.
+  archive first; any other container or an ambiguous multi-board tar
+  returns 74, so `sysupgrade -F` cannot dispatch a raw `factory.ubi`
+  recovery image or a different board directory to NAND.
 - Added the tracked buildroot seed
   `target/linux/qualcommbe/ipq95xx/xiaomi_be18000.config` and
   documented feeds plus the owner-supplied board-2 prerequisite for a
@@ -90,11 +91,11 @@ Artifacts are archived under `QWRT/extracted/be18000-build/`.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,104,280 | `a29d2737aa818067658d6791894b7df46df9ae54602f209fe877ac578a3029e6` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `6123fe9801094e282c45e003c2ca96dabbaea6f05e86bde4471343dfa971f4b7` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `e7e9a44c4777e27c3a4e6cc7f4b3f6474a97fa5460358762cb606a7210f50094` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,104,532 | `20b94f5d801e6ef9d96bb761b63c6e8027544ef0d4bcbd7b5ec196bcc88c2c95` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `642d2acbfe2b4bd306e93a8778679484d3ca7579db8776ac5b75e3f457d32ce7` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `d079d464927543edd1e6a7620d36ae234702a81b70e3af27b2f34c21d3b42b40` |
 | `openwrt-qualcommbe-ipq95xx-xiaomi_be18000.manifest` | 4,471 | `7f22d11663e8815013c4c01f63caba77cc71fb3d051784193e81a5251d950823` |
-| `profiles.json` | 2,123 | `212d11662d4ada8a2936a0a6788f4f57231a648d2ae08764009291aef162fd75` |
+| `profiles.json` | 2,123 | `466096314e74d41626a9c08aa9e346bbb3cb90a6e3936595c8a54205724f1547` |
 | `config.buildinfo` | 152 | `b65255fd8dbd33a196f1aad512d07e5c8a28188de75c82bb25561d2447abc4b3` |
 
 ## FIT inspection

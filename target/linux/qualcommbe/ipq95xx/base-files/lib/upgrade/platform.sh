@@ -7,7 +7,7 @@ RAMFS_COPY_DATA='/etc/fw_env.config /var/lock/fw_printenv.lock'
 be18000_check_sysupgrade() {
 	local image="$1"
 	local board_dir="sysupgrade-xiaomi_be18000"
-	local cmd members member
+	local cmd members member dirs
 
 	# The generated sysupgrade image is an uncompressed or gzip tar.
 	# A raw factory.ubi has the UBI magic and must never reach
@@ -15,6 +15,15 @@ be18000_check_sysupgrade() {
 	cmd="$(identify_if_gzip "$image")cat"
 	members="$($cmd < "$image" 2>/dev/null | tar tf - 2>/dev/null)" || {
 		echo "BE18000: expected a sysupgrade tar, not a raw recovery image" >&2
+		return 1
+	}
+
+	# nand_upgrade_tar uses the first sysupgrade-*/ directory.  Refuse
+	# ambiguous archives so a differently named directory cannot be
+	# selected instead of the Xiaomi one.
+	dirs="$(printf '%s\n' "$members" | grep '^sysupgrade-[^/]*/$' | sort -u)"
+	[ "$dirs" = "$board_dir/" ] || {
+		echo "BE18000: expected exactly one $board_dir/ directory" >&2
 		return 1
 	}
 
