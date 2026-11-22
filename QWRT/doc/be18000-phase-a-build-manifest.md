@@ -77,13 +77,34 @@ Review fixes (2026-11-22):
   recovery image or a different board directory to NAND.
 - Added the tracked buildroot seed
   `target/linux/qualcommbe/ipq95xx/xiaomi_be18000.config` and
-  documented feeds plus the owner-supplied board-2 prerequisite for a
-  build from a fresh directory.
+  documented the owner-supplied board-2 prerequisite for a build from a
+  fresh directory.  The seed selects only core packages, so feeds are
+  optional and do not affect the generated image.
 - Second review corrected the NSSCC parent clocks: the package
   reference is `&cmn_pll ETH0_50MHZ_CLK`, not the 25 MHz XO; the four
   UNIPHY 125 MHz inputs are not wired (`<0>`), and the MDIO bus runs at
   6.25 MHz.  This matches the working QWRT mainline BE10000 reference
   and the QCA8084 binding.
+
+Independent review triage (2026-11-22):
+
+- MDIO pinmux is not missing: `ipq9574.dtsi` sets
+  `pinctrl-0 = <&mdio_pins>` on `mdio@90000`; the compiled DTB carries
+  it.
+- The four LAN ports intentionally share ART MAC +1.  The live system
+  uses `...:dd` for `eth0`-`eth3` and `br-lan`; the QSDK `dp2`/`dp3`
+  consecutive values are not the live interface MACs.
+- The `bootloader`, `SBL`, `TZ` and `SMEM` reservations come from the
+  SoC dtsi and are present in the compiled DTB; only `tzapp` is
+  board-local.
+- GPIO60 reset polarity follows the working mainline reference
+  (`GPIO_ACTIVE_LOW`); the live QSDK `phy-reset-gpio` flag is not the
+  mainline binding.
+- The four `<0>` NSSCC parents match the working reference and are
+  intentionally empty because those UNIPHY inputs are not wired.
+- A fresh copy with no feeds completed `make defconfig` with the same
+  five seed selections; the full build was performed in the copied WSL
+  tree.
 
 ## Artifacts
 
@@ -190,16 +211,19 @@ kmod-leds-pwm 6.18.60-r1
 
 ## Reproduce
 
-A fresh build needs four inputs: the source at the commit containing
-this manifest, the matching feeds, the owner-supplied board-2 binary,
-and the tracked buildroot seed.  The board-2 binary is deliberately not
-committed while its redistribution rights are unresolved.
+A fresh build needs three inputs: the source at the commit containing
+this manifest, the owner-supplied board-2 binary, and the tracked
+buildroot seed.  Feeds are optional: the seed selects only core
+packages, so no feed revision affects the generated image.  The board-2
+binary is deliberately not committed while its redistribution rights
+are unresolved.
 
 ```sh
-# 1. Source and feeds.  Check out the commit containing this manifest.
+# 1. Source.  Check out the commit containing this manifest.
 cd /path/to/openwrt
-./scripts/feeds update -a
-./scripts/feeds install -a
+# Feeds are only needed for menuconfig or extra feed packages:
+# ./scripts/feeds update -a
+# ./scripts/feeds install -a
 
 # 2. Owner-supplied board-2 (not tracked).
 cp /path/to/board-live-be18000.qcn9274 \
@@ -217,7 +241,10 @@ make REVISION=be18000 -j"$(nproc)" V=s
 The seed selects target `qualcommbe`, subtarget `ipq95xx`, device
 `xiaomi_be18000`, the initramfs image and `kmod-input-core`;
 `make defconfig` fills in the remaining target, package and image
-defaults.  `REVISION=be18000` keeps the release string stable.  The
+defaults.  The archived 152-byte `config.buildinfo` is the complete
+non-default diff, not a truncated package list: `DEVICE_PACKAGES` in
+`target/linux/qualcommbe/image/ipq95xx.mk` supplies the per-device
+packages.  `REVISION=be18000` keeps the release string stable.  The
 copied WSL tree used for this manifest has no `.git`, so it is mandatory
 there; in a fresh clone it is optional but recommended.
 
