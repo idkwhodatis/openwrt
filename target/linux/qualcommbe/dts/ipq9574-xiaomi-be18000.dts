@@ -682,6 +682,18 @@
 		nvmem-cells = <&aqr_fw>;
 		nvmem-cell-names = "firmware";
 	};
+
+	/*
+	 * Live SFP+ QCA SFP device.  The mainline tree has no matching
+	 * driver; keep it disabled so the generic C45 phylib does not bind
+	 * to it.  GPIO64 is the live SFP reset.
+	 */
+	sfp_phy: ethernet-phy@1e {
+		compatible = "ethernet-phy-ieee802.3-c45";
+		reg = <0x1e>;
+		reset-gpios = <&tlmm 64 GPIO_ACTIVE_LOW>;
+		status = "disabled";
+	};
 };
 
 &qcom_ppe {
@@ -798,6 +810,35 @@
 			resets = <&nsscc PORT5_MAC_ARES>,
 				 <&nsscc PORT5_RX_ARES>,
 				 <&nsscc PORT5_TX_ARES>;
+			reset-names = "mac", "rx", "tx";
+		};
+
+		/*
+		 * SFP+ is staged but disabled: the live unit uses the QCA SFP
+		 * MDIO device at 0x1e, not a generic EEPROM, and no mainline
+		 * driver is available.  Keep the validated LAN/WAN mapping
+		 * independent of this port.
+		 */
+		port@6 {
+			reg = <6>;
+			phy-mode = "usxgmii";
+			phy-handle = <&sfp_phy>;
+			pcs-handle = <&pcs2_ch0>;
+			managed = "in-band-status";
+			label = "sfp";
+			status = "disabled";
+
+			nvmem-cells = <&ethaddr 1>;
+			nvmem-cell-names = "mac-address";
+
+			clocks = <&nsscc NSS_CC_PORT6_MAC_CLK>,
+				 <&nsscc NSS_CC_PORT6_RX_CLK>,
+				 <&nsscc NSS_CC_PORT6_TX_CLK>;
+			clock-names = "mac", "rx", "tx";
+
+			resets = <&nsscc PORT6_MAC_ARES>,
+				 <&nsscc PORT6_RX_ARES>,
+				 <&nsscc PORT6_TX_ARES>;
 			reset-names = "mac", "rx", "tx";
 		};
 	};
@@ -944,6 +985,40 @@
 	};
 
 	/*
+	 * The live QSDK only muxes the three PERST lines; wake/clkreq
+	 * lines are left at their boot state and are not claimed.
+	 */
+	pcie1_default: pcie1-default-state {
+		perst-n-pins {
+			pins = "gpio26";
+			function = "gpio";
+			drive-strength = <8>;
+			bias-pull-down;
+			output-low;
+		};
+	};
+
+	pcie2_default: pcie2-default-state {
+		perst-n-pins {
+			pins = "gpio29";
+			function = "gpio";
+			drive-strength = <8>;
+			bias-pull-down;
+			output-low;
+		};
+	};
+
+	pcie3_default: pcie3-default-state {
+		perst-n-pins {
+			pins = "gpio23";
+			function = "gpio";
+			drive-strength = <8>;
+			bias-pull-down;
+			output-low;
+		};
+	};
+
+	/*
 	 * The SoC DTSI references this label from the disabled SDHC node.
 	 * Keep the group defined so the board DTB links even though this
 	 * board boots from QPIC NAND.
@@ -977,6 +1052,173 @@
 			function = "sdc_rclk";
 			drive-strength = <8>;
 			bias-pull-down;
+		};
+	};
+};
+
+/*
+ * Phase D/G: the three QCN9224 endpoints from the live unit.
+ *
+ * pcie1 = 2.4 GHz (variant _live_1), pcie2 = 5 GHz (_live_2),
+ * pcie3 = 6 GHz (_live_4).  The live unit uses PERST GPIO26/29/23.
+ * Wake GPIOs are intentionally not claimed: the live QSDK nodes only
+ * describe PERST.
+ *
+ * The WSI ring and qcom,wsi-controller on pcie2 are the mainline
+ * contract; the QSDK qcom,wsi/qcom,wsi_index/chip_info properties are
+ * not used.
+ */
+
+&pcie1_phy {
+	status = "okay";
+};
+
+&pcie1 {
+	pinctrl-0 = <&pcie1_default>;
+	pinctrl-names = "default";
+
+	perst-gpios = <&tlmm 26 GPIO_ACTIVE_LOW>;
+	status = "okay";
+
+	pcie@0 {
+		device_type = "pci";
+		reg = <0x0 0x0 0x0 0x0 0x0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		ranges;
+
+		wifi1: wifi@0 {
+			compatible = "pci17cb,1109";
+			reg = <0x0 0x0 0x0 0x0 0x0>;
+			qcom,calibration-variant = "Xiaomi_BE18000_live_1";
+
+			memory-region = <&qcn9224_pcie1>, <&m3_dump>;
+			nvmem-cells = <&ethaddr 2>;
+			nvmem-cell-names = "mac-address";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					wifi1_wsi_tx: endpoint {
+						remote-endpoint = <&wifi2_wsi_rx>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+
+					wifi1_wsi_rx: endpoint {
+						remote-endpoint = <&wifi3_wsi_tx>;
+					};
+				};
+			};
+		};
+	};
+};
+
+&pcie2_phy {
+	status = "okay";
+};
+
+&pcie2 {
+	pinctrl-0 = <&pcie2_default>;
+	pinctrl-names = "default";
+
+	perst-gpios = <&tlmm 29 GPIO_ACTIVE_LOW>;
+	status = "okay";
+
+	pcie@0 {
+		device_type = "pci";
+		reg = <0x0 0x0 0x1 0x0 0x0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		ranges;
+
+		wifi2: wifi@0 {
+			compatible = "pci17cb,1109";
+			reg = <0x0 0x0 0x0 0x0 0x0>;
+			qcom,calibration-variant = "Xiaomi_BE18000_live_2";
+			qcom,wsi-controller;
+
+			memory-region = <&qcn9224_pcie2>, <&m3_dump>;
+			nvmem-cells = <&ethaddr 3>;
+			nvmem-cell-names = "mac-address";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					wifi2_wsi_tx: endpoint {
+						remote-endpoint = <&wifi3_wsi_rx>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+
+					wifi2_wsi_rx: endpoint {
+						remote-endpoint = <&wifi1_wsi_tx>;
+					};
+				};
+			};
+		};
+	};
+};
+
+&pcie3_phy {
+	status = "okay";
+};
+
+&pcie3 {
+	pinctrl-0 = <&pcie3_default>;
+	pinctrl-names = "default";
+
+	perst-gpios = <&tlmm 23 GPIO_ACTIVE_LOW>;
+	status = "okay";
+
+	pcie@0,0 {
+		device_type = "pci";
+		reg = <0x0 0x0 0x2 0x0 0x0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		ranges;
+
+		wifi3: wifi@0 {
+			compatible = "pci17cb,1109";
+			reg = <0x0 0x0 0x0 0x0 0x0>;
+			qcom,calibration-variant = "Xiaomi_BE18000_live_4";
+
+			memory-region = <&qcn9224_pcie3>, <&m3_dump>;
+			nvmem-cells = <&ethaddr 4>;
+			nvmem-cell-names = "mac-address";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					wifi3_wsi_tx: endpoint {
+						remote-endpoint = <&wifi1_wsi_rx>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+
+					wifi3_wsi_rx: endpoint {
+						remote-endpoint = <&wifi2_wsi_tx>;
+					};
+				};
+			};
 		};
 	};
 };

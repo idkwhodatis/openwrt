@@ -213,13 +213,13 @@ results, negotiated links, upgrade/recovery results and unresolved
 items per image revision. Mark wired-only, standalone tri-band and MLO
 milestones separately so downstream users know what was tested.
 
-**Next implementation unit:** the serial and RAM-FIT gate of A now has
-an inspected offline image; see the
-[Phase A/B/C build manifest](be18000-phase-a-build-manifest.md).  The
-static B/C Ethernet nodes are staged but unverified.  The next step is
-hardware: confirm the serial console, boot the FIT from RAM, return to
-the installed QWRT, then check QCA8084 PHY IDs at 1-4, package
-probe/link, AQR 10G and fan response.  The latest [live PCI3 verification](be10000-be18000-openwrt-gap-rounds.md#live-verification-of-the-pci3-return-path-and-caldb-mapping)
+**Next implementation unit:** the Phase A/B/C image is inspected and the
+Phase D/G PCIe/QCN9224/WSI and SFP staging is now in the board DTS; see
+the [Phase A/B/C/D-G build manifest](be18000-phase-a-build-manifest.md).
+The remaining source work is the Phase E coldboot handshake, which needs
+a hardware-observed QMI trace before it can be enabled.  The next
+hardware gate is still serial/RAM-FIT boot, QCA8084 PHY IDs at 1-4,
+AQR 10G and fan response.  The latest [live PCI3 verification](be10000-be18000-openwrt-gap-rounds.md#live-verification-of-the-pci3-return-path-and-caldb-mapping)
 and [HOST_CAP trace limits](be10000-be18000-openwrt-gap-rounds.md#can-the-existing-live-traces-recover-the-two-cal_done-tlvs)
 are the evidence baseline for D/E.
 
@@ -281,6 +281,46 @@ PHY ID register reads at 1-4, package probe, clock/reset programming,
 AQR 10G link, negotiated 2.5G/10G rates, fan response, or any traffic.
 
 
+
+### Phase D/G implementation checkpoint (2026-11-22)
+
+The offline radio and MLO graph is staged in the board DTS.  Hardware
+enumeration and firmware bring-up remain deferred:
+
+- `&pcie1` (2.4 GHz) uses PERST GPIO26, x1, variant
+  `Xiaomi_BE18000_live_1`, MAC `&ethaddr 2`.
+- `&pcie2` (5 GHz) uses PERST GPIO29, x2, variant
+  `Xiaomi_BE18000_live_2`, MAC `&ethaddr 3`, and is the sole
+  `qcom,wsi-controller`.
+- `&pcie3` (6 GHz) uses PERST GPIO23, x2, variant
+  `Xiaomi_BE18000_live_4`, MAC `&ethaddr 4`.
+- Each `wifi@0` references its 50 MiB QCN9224 region and `m3_dump`.
+  The WSI ring is the sbe1v1k three-node ring: 2.4G tx->5G rx,
+  5G tx->6G rx, 6G tx->2.4G rx, with the reverse RX links.
+- Wake GPIOs 27/30/33 and the QSDK `qcom,wsi`/`qcom,wsi_index`/
+  `chip_info` properties are intentionally not used.
+- SFP+ port 6 is staged **disabled**: `pcs2_ch0`, `usxgmii`, label
+  `sfp`, and a disabled MDIO `ethernet-phy@1e` with GPIO64 reset.
+  The live device is a QCA SFP PHY with no mainline driver, so the
+  validated LAN/WAN mapping remains independent of it.
+- `11-ath12k-caldata` deliberately has no Xiaomi case.  The live
+  high-band ART slices are blank or contain the factory BE10000 BDF;
+  the local `ipq-wifi-xiaomi_be18000` board-2 supplies the live
+  `_1/_2/_4` BDFs and regdb.
+
+**Phase E status: not enabled.**  The backports 7.2 ath12k in this tree
+does not carry the QSDK coldboot path (`QMI mode 7`, `CAL_DONE`
+indication, CALDB DMA lifetime, OFF/restart, second `HOST_CAP`).  QSDK
+patches 670/703 depend on vendor state that is not present here.  The
+image therefore keeps the normal mission-mode path; the coldboot
+handshake remains a separate hardware-gated patch series.  Do not add
+blank ART or zero-cache caldata as a shortcut.
+
+**Phase F/G audit:** the existing NAND/UBI image and sysupgrade path
+remain the validated offline baseline.  MLO stays opt-in in userspace;
+no default wireless configuration enables it.  I2C LM63/EMC2305,
+GPIO/PWM LEDs, pstore/ramoops and watchdog packages are already present
+in the image package set.
 
 ### Phase A implementation checkpoint (2026-11-21)
 

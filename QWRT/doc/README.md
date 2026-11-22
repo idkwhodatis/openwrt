@@ -25,18 +25,19 @@ working system and the installer-supplied QSDK13 image.
 
 ## Current conclusions
 
-- Phase A/B/C has an offline `qualcommbe/ipq95xx` image for
+- Phase A/B/C/D-G has an offline `qualcommbe/ipq95xx` image for
   `xiaomi,be18000`: FIT `config@al02-c4`, gzip `0x42080000`, UBI
   `kernel`/`rootfs`/`rootfs_data`, the live 292,256-byte Xiaomi board-2,
   and the live MIBIB partition table. The DTB also stages the live
   `tzapp` reservation, QCA8084 package/NSSCC, QCA8084 PHYs 1-4,
-  PCS/XPCS, AQR113C and PPE ports `lan1`-`lan4`/`wan`; SFP remains
-  deferred. Sysupgrade accepts only the Xiaomi tar with FIT kernel and
-  squashfs root; raw `factory.ubi` is recovery-only. Full hashes and
+  PCS/XPCS, AQR113C and PPE ports `lan1`-`lan4`/`wan`, plus
+  pcie1/2/3 QCN9224 nodes with the `_live_1/_2/_4` variants and the
+  three-node WSI ring. SFP port 6 is staged disabled. Phase E
+  coldboot remains a hardware-gated patch series. Full hashes and
   inspection output are in the
   [offline build manifest](be18000-phase-a-build-manifest.md).
-  This is not yet a hardware result; serial/RAM boot and PHY probe are
-  next.
+  This is not yet a hardware result; serial/RAM boot, PCIe enumeration
+  and PHY probe are next.
 - The custom radio mapping is PCI1/BDF1 (2.4G), PCI2/BDF2 (5G), PCI3/BDF4
   (6 GHz); PCI3 currently operates at 6135 MHz/320 MHz. The live unit was later
   moved to ch129/6595 by AWGN DCS; the port intentionally pins ch37/6135.

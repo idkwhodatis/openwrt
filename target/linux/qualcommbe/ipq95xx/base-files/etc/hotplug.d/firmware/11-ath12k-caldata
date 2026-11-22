@@ -6,6 +6,11 @@
 
 board=$(board_name)
 
+# Xiaomi BE18000 deliberately has no case below.  Its high-band ART
+# slices are blank or contain the factory BE10000 BDF, and the live
+# 2.4/5/6 GHz BDFs ship in the local board-2 package instead.  Do not
+# install cal-pci-* files from the ART for this board.
+
 case "$FIRMWARE" in
 "ath12k/QCN9274/hw2.0/cal-pci-0001:01:00.0.bin")
 	case "$board" in

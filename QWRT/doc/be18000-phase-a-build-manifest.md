@@ -1,12 +1,12 @@
-# BE18000 mainline OpenWrt: Phase A/B/C offline build manifest
+# BE18000 mainline OpenWrt: Phase A-G offline build manifest
 
-Date: 2026-11-21; review fixes 2026-11-22
+Date: 2026-11-21; review fixes and D-G staging 2026-11-22
 
 This manifest records the successful offline build of the
 `qualcommbe/ipq95xx` image for the modified BE10000 identified as
 `xiaomi,be18000`.  It is evidence for the source, image-layout and
 static board-DTS gates only.  No serial console, RAM boot, NAND write,
-PHY probe or radio probe has been performed.
+PCIe enumeration, PHY probe or radio probe has been performed.
 
 ## Source and build host
 
@@ -133,17 +133,38 @@ NAND upgrade hardening (2026-11-22):
   `nand_upgrade_tar` return 1; a succeeding fake writes root and kernel
   and returns 0.
 
+Phase D/G source changes (2026-11-22):
+
+- `&pcie1` (2.4 GHz), `&pcie2` (5 GHz) and `&pcie3` (6 GHz) are enabled
+  with the live PERST map GPIO26/29/23 and the mainline domains 1/2/3.
+  Wake GPIOs 27/30/33 are intentionally not claimed.
+- `wifi@0` nodes use `pci17cb,1109`, variants
+  `Xiaomi_BE18000_live_1/_2/_4`, MAC cells `&ethaddr 2/3/4`, and their
+  QCN9224 50 MiB memory-region plus `m3_dump`.
+- The three-node WSI ring is present: 2.4G tx -> 5G rx, 5G tx -> 6G rx,
+  6G tx -> 2.4G rx with the reverse RX links.  `qcom,wsi-controller` is
+  only on the 5 GHz node.
+- SFP+ port 6 is staged disabled with `pcs2_ch0`, `usxgmii`, label
+  `sfp`, and a disabled MDIO `ethernet-phy@1e` with GPIO64 reset.  The
+  live QCA SFP PHY has no mainline driver.
+- `11-ath12k-caldata` deliberately has no Xiaomi case; the high-band ART
+  slices are blank/factory and the local board-2 supplies the live BDFs.
+- Phase E coldboot is not enabled: backports 7.2 lacks the QSDK
+  `CAL_DONE`/mode-7 lifecycle, and QSDK patches 670/703 depend on vendor
+  state not present in this tree.  Normal mission mode remains the
+  default; the coldboot handshake is a hardware-gated patch series.
+
 ## Artifacts
 
 Artifacts are archived under `QWRT/extracted/be18000-build/`.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,104,860 | `7bf106606abad8a78da9ab10c712fd8bde478fd8b4b630ed4bf73d4f139816ba` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `2d47ab43686f18c703ea58fc697e0aea4fd8fac80326ccba9f69dbd652cbd0c4` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `aa2fced9057bbe50f0d199778a699a355cdbb26f05ad188b9c22f14cfd5d1022` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,107,768 | `0fb3067bc7e758572ca05b76f699b5402f4c0bed2734cd66719949523c6382e4` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `0f2eace149ed6ef53984ec8bd1eaf08d8d6ce5994c583d814a0aea3ebec61505` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `26cdfa2ee8b7177d1b3ea9508f4c7129974aebe75c3217ba72a6882efbcf04b6` |
 | `openwrt-qualcommbe-ipq95xx-xiaomi_be18000.manifest` | 4,471 | `7f22d11663e8815013c4c01f63caba77cc71fb3d051784193e81a5251d950823` |
-| `profiles.json` | 2,123 | `487834e4bb2cd4515b8a33f853e57b3fb1bdb41e758c78009fd16dc35797581c` |
+| `profiles.json` | 2,123 | `533e7ef410e89024cb68d64cdeaeeb60433e987d659b4eae7729f5015fe7cef2` |
 | `config.buildinfo` | 152 | `b65255fd8dbd33a196f1aad512d07e5c8a28188de75c82bb25561d2447abc4b3` |
 
 ## FIT inspection
@@ -155,7 +176,7 @@ Both the standalone initramfs FIT and the kernel volume inside
 - Kernel compression: gzip
 - Load/entry: `0x42080000`
 - FDT description: `xiaomi_be18000`
-- FDT size: 42,791 bytes
+- FDT size: 45,531 bytes
 
 The embedded board DTB reports:
 
@@ -185,7 +206,18 @@ PHYs:                1, 2, 3, 4 (ethernet-phy-id004d.d180)
 PCS/XPCS:            pcs-phy@6, xpcs-phy@7 with four channels
 PPE port 1-4:        lan1-lan4, phy-mode 10g-qxgmii
 PPE port 5:          wan, phy-mode usxgmii
+PPE port 6:          sfp, disabled, pcs2_ch0, PHY 0x1e
 AQR113C:             C45 address 0, nvmem-cell "firmware"
+```
+
+PCIe/WSI nodes in the same DTB:
+
+```text
+pcie1:               okay, PERST GPIO26, domain 1, variant live_1, MAC +2
+pcie2:               okay, PERST GPIO29, domain 2, variant live_2, MAC +3, wsi-controller
+pcie3:               okay, PERST GPIO23, domain 3, variant live_4, MAC +4
+WSI ring:            2.4G tx -> 5G rx, 5G tx -> 6G rx, 6G tx -> 2.4G rx
+SFP:                 port6/sfp disabled; PHY 0x1e disabled, reset GPIO64
 ```
 
 ## UBI layout
@@ -301,8 +333,11 @@ This manifest does **not** establish:
 - a successful RAM boot or serial console on the actual unit;
 - QCA8084 package probe, PHY ID reads, clock/reset programming, or
   2.5G/10G link and traffic (the static DTS nodes are present);
-- PCIe enumeration, board-2 selection or QCN9224 firmware start;
-- cold-boot calibration, 5G/6G operation or MLO;
+- PCIe enumeration, pcie1/2/3 link widths, board-2 selection,
+  QCN9224 firmware start or WSI ring index validation;
+- coldboot calibration (not enabled), 5G/6G operation or MLO;
+- SFP+ port 6, which is staged disabled because no mainline QCA SFP
+  driver is present;
 - NAND writes, sysupgrade or recovery on hardware.
 
 The next hardware step is the serial/RAM-FIT gate in the port plan.  Do
