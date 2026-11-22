@@ -285,7 +285,7 @@ Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
 +		return;
 +	}
 +
-+	if (qmi->cal_done && qmi->caldb_valid) {
++	if (timeout && qmi->cal_done && qmi->caldb_valid) {
 +		success = true;
 +	} else {
 +		qmi->cal_timeout = true;

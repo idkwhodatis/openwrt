@@ -10,9 +10,9 @@ Build outputs under `QWRT/extracted/be18000-build/` (recorded in
 
 | File | SHA-256 |
 |---|---|
-| `...-initramfs-uImage.itb` | `4ee42107b119f6e995ccf20851b68913b649ded5fd16b786c0bb597bdda935f8` |
-| `...-squashfs-factory.ubi` | `1e67a19687c5d699c98fb7ea2e4d55af773fdd2db1bd5b2679bc4d8c49cc7223` |
-| `...-squashfs-sysupgrade.bin` | `b0a42e16e6c2ce3c491ea2818ff94b48da9fb4a9219ef2189e9ec54d7cb88e24` |
+| `...-initramfs-uImage.itb` | `350cbfa67f14431418126a419b03ac5b3f1c5ce0a50deb8263ce6530d039a5bf` |
+| `...-squashfs-factory.ubi` | `ca94bc133adcfbed495567e368056aa46be971256635a77d7b2e32e63f0cc6cf` |
+| `...-squashfs-sysupgrade.bin` | `d7f0939a30d111870c84f478434e3a94edec0b64adebbacc04bf95fd56c4f02a` |
 
 Live reference: `QWRT/extracted/live-be18000/firmware/live-kernel.fit`.
 

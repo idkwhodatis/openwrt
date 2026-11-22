@@ -117,7 +117,7 @@ Still in the initramfs, fetch `factory.ubi` (17,039,360 bytes) to `/tmp`:
 ```sh
 # PC push, or wget from a local HTTP server
 nc -l -p 9001 > /tmp/factory.ubi
-sha256sum /tmp/factory.ubi   # must be 1e67a19687c5d699c98fb7ea2e4d55af773fdd2db1bd5b2679bc4d8c49cc7223
+sha256sum /tmp/factory.ubi   # must be ca94bc133adcfbed495567e368056aa46be971256635a77d7b2e32e63f0cc6cf
 ```
 
 Resolve the `rootfs` mtd by name, then detach any UBI that the bootloader's

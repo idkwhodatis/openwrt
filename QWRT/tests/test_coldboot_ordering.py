@@ -38,6 +38,7 @@ class ColdBoot:
         self.caldb_paddr = 0
         self.fw_ready = False
         self.timer_start = None
+        self.timed_out = False
         self.reset_count = 0
         self.clock = 0
 
@@ -85,12 +86,13 @@ class ColdBoot:
         if (self.state == WAIT_CAL and self.timer_start is not None and
                 not self.cal_done and
                 self.clock >= self.timer_start + TIMEOUT_S):
+            self.timed_out = True
             self.cal_timeout = True
             self.invalidate_caldb()
             self.state = RESET
 
     def worker_finish(self):
-        success = self.cal_done and self.caldb_valid
+        success = not self.timed_out and self.cal_done and self.caldb_valid
         if not success:
             self.cal_timeout = True
             self.invalidate_caldb()
@@ -121,6 +123,7 @@ def source_checks():
     assert "wait_for_completion_timeout(&qmi->cal_done_completion" in work
     assert (work.index("ath12k_qmi_wlanfw_mode_send") <
             work.index("wait_for_completion_timeout(&qmi->cal_done_completion"))
+    assert "if (timeout && qmi->cal_done && qmi->caldb_valid)" in work
     assert "if (!qmi->cold_boot_cal || qmi->cal_done || qmi->cal_timeout)" not in work
 
     cb = text.split("static void ath12k_qmi_msg_cal_done_cb", 1)[1]
@@ -186,6 +189,24 @@ def test_cal_done_without_caldb_is_rejected():
     assert not cb.host_cap_cal_done()
 
 
+def test_deadline_race_is_rejected():
+    cb = ColdBoot()
+    cb.fw_ready_event()
+    cb.worker_begin()
+    cb.mode_send_ok()
+    cb.clock = TIMEOUT_S
+    cb.timed_out = True
+    # A result delivered after the deadline but before the worker takes the
+    # state lock must not become a successful calibration.
+    cb.caldb_idx = 0
+    cb.caldb_size = cb.caldb[0]["size"]
+    cb.caldb_paddr = cb.caldb[0]["paddr"]
+    cb.caldb_valid = True
+    cb.cal_done = True
+    assert not cb.worker_finish()
+    assert not cb.host_cap_cal_done()
+
+
 def test_mode_request_failure_still_restarts():
     cb = ColdBoot()
     cb.fw_ready_event()
@@ -231,6 +252,7 @@ def main():
         test_timer_starts_after_mode_accept,
         test_late_cal_done_is_rejected,
         test_cal_done_without_caldb_is_rejected,
+        test_deadline_race_is_rejected,
         test_mode_request_failure_still_restarts,
         test_mission_memory_keeps_caldb,
         test_mission_memory_replacement_is_rejected,

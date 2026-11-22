@@ -155,7 +155,7 @@ Phase D/G source changes (2026-11-22):
   restart, second `HOST_CAP` and MLO suppression during calibration.
   The CAL_DONE deadline starts after mode 7 is accepted, the worker
   consumes an already-completed result, and mission memory requests
-  cannot replace a retained CALDB allocation.  Seven offline
+  cannot replace a retained CALDB allocation.  Eight offline
   event-ordering checks pass; the default image keeps normal mission
   mode.  See the [Phase E status](be18000-phase-e-coldboot.md).
 
@@ -172,10 +172,10 @@ Phase D-G audit evidence (2026-11-22):
 - The rootfs `ath12k.ko` exposes `parm: cold_boot_cal:bool` from patch
   701.  No `/etc/modules.conf` option or UCI default sets it, so mission
   mode remains the shipped behavior.
-- `QWRT/tests/test_coldboot_ordering.py` passes 7 cases covering the
+- `QWRT/tests/test_coldboot_ordering.py` passes 8 cases covering the
   fast-result restart, post-mode-7 deadline, late CAL_DONE rejection,
-  CALDB-less CAL_DONE, mode-request fallback, retained CALDB reuse and
-  incompatible CALDB replacement.
+  deadline-race rejection, CALDB-less CAL_DONE, mode-request fallback,
+  retained CALDB reuse and incompatible CALDB replacement.
 - `QWRT/tests/test_recovery_runbook.py` verifies that the first-flash
   digest matches the archived `factory.ubi`, that the runbook resolves
   and detaches the rootfs UBI before formatting, and that the image has
@@ -192,11 +192,11 @@ Artifacts are archived under `QWRT/extracted/be18000-build/`.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,109,752 | `4ee42107b119f6e995ccf20851b68913b649ded5fd16b786c0bb597bdda935f8` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `1e67a19687c5d699c98fb7ea2e4d55af773fdd2db1bd5b2679bc4d8c49cc7223` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,107,781 | `b0a42e16e6c2ce3c491ea2818ff94b48da9fb4a9219ef2189e9ec54d7cb88e24` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,109,668 | `350cbfa67f14431418126a419b03ac5b3f1c5ce0a50deb8263ce6530d039a5bf` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `ca94bc133adcfbed495567e368056aa46be971256635a77d7b2e32e63f0cc6cf` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,107,781 | `d7f0939a30d111870c84f478434e3a94edec0b64adebbacc04bf95fd56c4f02a` |
 | `openwrt-qualcommbe-ipq95xx-xiaomi_be18000.manifest` | 4,471 | `7f22d11663e8815013c4c01f63caba77cc71fb3d051784193e81a5251d950823` |
-| `profiles.json` | 2,123 | `a2bf13cec270ba5a36daf950cd5fa99af238d08752b70fa099b9b71978c730d0` |
+| `profiles.json` | 2,123 | `943ce3b2744a0232ad152050901a4ce3e1a0c020c5c7b88ab7a09820d8ced6ce` |
 | `config.buildinfo` | 152 | `b65255fd8dbd33a196f1aad512d07e5c8a28188de75c82bb25561d2447abc4b3` |
 
 ## FIT inspection
