@@ -216,8 +216,9 @@ milestones separately so downstream users know what was tested.
 **Next implementation unit:** the Phase A/B/C image is inspected and the
 Phase D/G PCIe/QCN9224/WSI and SFP staging is now in the board DTS; see
 the [Phase A/B/C/D-G build manifest](be18000-phase-a-build-manifest.md).
-The remaining source work is the Phase E coldboot handshake, which needs
-a hardware-observed QMI trace before it can be enabled.  The next
+The Phase E coldboot handshake is now present behind an opt-in module
+parameter, but still needs a hardware-observed QMI trace before it can
+be enabled.  The next
 hardware gate is still serial/RAM-FIT boot, QCA8084 PHY IDs at 1-4,
 AQR 10G and fan response.  The latest [live PCI3 verification](be10000-be18000-openwrt-gap-rounds.md#live-verification-of-the-pci3-return-path-and-caldb-mapping)
 and [HOST_CAP trace limits](be10000-be18000-openwrt-gap-rounds.md#can-the-existing-live-traces-recover-the-two-cal_done-tlvs)
@@ -308,14 +309,15 @@ enumeration and firmware bring-up remain deferred:
   the local `ipq-wifi-xiaomi_be18000` board-2 supplies the live
   `_1/_2/_4` BDFs and regdb.
 
-**Phase E status: not enabled.**  The backports 7.2 ath12k in this tree
-does not carry the QSDK coldboot path (`QMI mode 7`, `CAL_DONE`
-indication, CALDB DMA lifetime, OFF/restart, second `HOST_CAP`).  QSDK
-patches 670/703 depend on vendor state that is not present here.  The
-image therefore keeps the normal mission-mode path; the coldboot
-handshake remains a separate hardware-gated patch series.  See the
-[Phase E porting brief](be18000-phase-e-coldboot.md).  Do not add blank
-ART or zero-cache caldata as a shortcut.
+**Phase E status: opt-in patch implemented, disabled by default.**
+Mac80211 patch 701 adds the mainline coldboot path (`QMI mode 7`,
+`CAL_DONE` indication, CALDB DMA lifetime, OFF/restart, second
+`HOST_CAP`) behind `ath12k.cold_boot_cal=1`.  It is compile-tested but
+not hardware-tested; the image keeps the normal mission-mode path.
+QSDK patches 670/703 still cannot be used directly because they depend
+on vendor state not present here.  See the
+[Phase E status](be18000-phase-e-coldboot.md).  Do not add blank ART or
+zero-cache caldata as a shortcut.
 
 **Phase F/G audit:** the existing NAND/UBI image and sysupgrade path
 remain the validated offline baseline.  MLO stays opt-in in userspace;
@@ -477,10 +479,10 @@ The mainline `qcom_rdp433` (AP-AL02-C4) is the same board family as the live
    `CONFIG_SENSORS_EMC2305`/`kmod-hwmon-*`, `CONFIG_LEDS_PWM`/`kmod-leds-pwm`.
 5. Build and inspect the image only:
    - `factory.ubi` must contain `kernel`, `rootfs`, `rootfs_data`.
-   - FIT must have `config@al02-c4`, load/entry 0x42080000, gzip, and a FIT
-     root `append-bootargs` containing `root=/dev/ubiblock0_1`. OpenWrt
-     `mkits.sh` does not add this; the live runtime DT gets it from the QSDK
-     `chosen/bootargs-append`, which mainline does not consume.
+   - FIT must have `config@al02-c4`, load/entry 0x42080000, gzip, and a
+     cmdline ending in `root=/dev/ubiblock0_1`. The DTB
+     `chosen/bootargs-append` plus generic hack 920 supplies it; a FIT-root
+     `append-bootargs` is optional. See `be18000-fit-crosscheck.md`.
    - board-2 must be the Xiaomi file; firmware files must be present.
 
 **Device definition draft**
@@ -684,16 +686,23 @@ RDP433 reference partition table.
 
 1. Preserve `0:ART`, `0:ETHPHYFW`, `0:APPSBL`, `0:MIBIB`, `0:CDT`,
    `0:QSEE`, `0:DEVCFG`, `0:APDP`.
-2. Build `factory.ubi` with `kernel`/`rootfs`/`rootfs_data`; write only the
-   `rootfs` mtd partition (mtd24, 0xbe00000) via U-Boot web recovery/TFTP or
-   `ubiformat` from a recovery initramfs.
+2. Build `factory.ubi` with `kernel`/`rootfs`; write only the `rootfs` mtd
+   (mtd24, 0xbe00000) with `ubiformat` from a recovery initramfs. Do not use
+   `nand write` for a UBI image. Commands: `be18000-recovery-runbook.md`.
 3. Keep a serial console at 115200 and the U-Boot web recovery as the fallback.
-4. FIT: `config@al02-c4`, gzip, load/entry 0x42080000. If the stock U-Boot
-   rejects it, test 0x42200000/lzma only as a separate change.
+4. FIT: `config@al02-c4`, gzip, load/entry 0x42080000. The ubiblock root comes
+   from the DTB `chosen/bootargs-append` + generic hack 920
+   (`be18000-fit-crosscheck.md`). If the stock U-Boot rejects the FIT, test
+   0x42200000/lzma only as a separate change.
 5. `sysupgrade`: add a Xiaomi `platform_do_upgrade` case with
    `CI_KERNPART="kernel"`, `CI_ROOTPART="rootfs"`, `nand_do_upgrade`.
 6. UBI parameters: 0x20000 erase, 2048 page/subpage, VID header 2048; verify
-   against the stock live UBI before first write.
+   against the stock live UBI before first write. The built `factory.ubi` has
+   volume 0 `kernel` and volume 1 `rootfs`; `rootfs_data` is created on first
+   boot.
+7. Bootloader: keep the installed QWRT U-Boot. The live unit matches the MAX
+   MIBIB and the MAX `uboot.bin` byte-for-byte; never flash the v2 MIBIB
+   (`be18000-uboot-package-analysis.md`).
 
 ## 8. Validation matrix
 
@@ -975,11 +984,13 @@ granular evidence and corrections.
 
 **Step 3 — Plan delta**
 
-- Extend `Build/fit-its`/`mkits.sh` with a device variable such as
+- Optional: extend `Build/fit-its`/`mkits.sh` with a device variable such as
   `DEVICE_FIT_APPEND_BOOTARGS` (or a `-b` option) that emits
-  `append-bootargs = " root=/dev/ubiblock0_1";` at the FIT root. Add
-  `swiotlb=1 coherent_pool=2M` only if the mainline kernel needs them; omit
-  `cnss2.*`.
+  `append-bootargs = " root=/dev/ubiblock0_1";` at the FIT root. The verified
+  boot path does not need it: generic hack 920 appends the DTB
+  `chosen/bootargs-append` in the built 6.18.60 kernel. Keep it only as
+  belt-and-braces if a bootloader replaces the DTB cmdline. Add
+  `swiotlb=1 coherent_pool=2M` only if needed; omit `cnss2.*`.
 - Do not rely on `chosen/bootargs-append`: it is a QSDK-side property and
   mainline does not consume it. A DTB `chosen` property is not the FIT root
   `append-bootargs`.

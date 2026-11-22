@@ -18,6 +18,8 @@ Read the reports in order; later reports refine earlier unknowns:
 12. [BE18000 mainline port risk research](be18000-port-risk-research.md)
 13. [BE10000 vs BE18000 QWRT: 20 OpenWrt gap rounds](be10000-be18000-openwrt-gap-rounds.md)
 14. [QWRT U-Boot package analysis (MAX vs v2, live match)](be18000-uboot-package-analysis.md)
+15. [OpenWrt FIT vs live QWRT FIT cross-check](be18000-fit-crosscheck.md)
+16. [Recovery and first-flash runbook (MAX layout)](be18000-recovery-runbook.md)
 
 The owner's router is the 6 GHz hardware conversion identified by QWRT as
 `xiaomi,be18000`. Start with the [modified-unit source comparison](be10000-be18000-openwrt-gap-rounds.md#owners-modified-be10000-be18000-firmware-profile)
@@ -39,6 +41,13 @@ working system and the installer-supplied QSDK13 image.
   [offline build manifest](be18000-phase-a-build-manifest.md).
   This is not yet a hardware result; serial/RAM boot, PCIe enumeration
   and PHY probe are next.
+- The installed U-Boot is the exact QWRT package in `QWRT/UBoot` (MAX MIBIB,
+  byte-identical to the live `0:APPSBL` prefix). The built FIT matches its
+  boot contract, and `root=/dev/ubiblock0_1` comes from the DTB
+  `chosen/bootargs-append` plus kernel hack 920. See the
+  [U-Boot package analysis](be18000-uboot-package-analysis.md),
+  [FIT cross-check](be18000-fit-crosscheck.md) and
+  [recovery runbook](be18000-recovery-runbook.md).
 - The custom radio mapping is PCI1/BDF1 (2.4G), PCI2/BDF2 (5G), PCI3/BDF4
   (6 GHz); PCI3 currently operates at 6135 MHz/320 MHz. The live unit was later
   moved to ch129/6595 by AWGN DCS; the port intentionally pins ch37/6135.
