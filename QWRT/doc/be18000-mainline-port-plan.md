@@ -262,6 +262,14 @@ DTS.  Hardware verification is deliberately deferred:
   FIT kernel and squashfs root.  Any other container, an ambiguous
   multi-board tar, or the raw `factory.ubi` recovery image returns 74
   and cannot be forced through `nand_do_upgrade`.
+- `platform_do_upgrade` passes the same validated directory to the
+  flasher through `CI_BOARD_DIR`.  `nand_upgrade_tar` uses it instead
+  of re-selecting the first archive directory.
+- UBI and MTD write failures now propagate: `ubiupdatevol`,
+  `mtd write`, `nandwrite` and `flash_erase` failures return 1, so
+  `nand_do_upgrade` reports failure and does not restore the config.
+- The `leds-pwm` container no longer claims the `pwm_pins` group; the
+  PWM controller (`&pwm`) is the sole owner.
 
 Offline evidence: the board DTB compiles and contains the tzapp, MDIO
 bus, NSSCC, QCA8084 package, `qcom,package-mode = <0>`, the 1-7 address

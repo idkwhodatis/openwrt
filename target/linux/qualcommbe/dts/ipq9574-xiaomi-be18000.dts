@@ -190,8 +190,6 @@
 
 	leds-pwm {
 		compatible = "pwm-leds";
-		pinctrl-0 = <&pwm_pins>;
-		pinctrl-names = "default";
 
 		led_rgb_red: rgb-red {
 			label = "rgb:red";

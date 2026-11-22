@@ -4,9 +4,16 @@ REQUIRE_IMAGE_METADATA=1
 RAMFS_COPY_BIN='fw_printenv fw_setenv head cmp sha256sum tr mktemp ubiformat ubiattach ubidetach ubimkvol ubirmvol ubinfo nanddump mtd'
 RAMFS_COPY_DATA='/etc/fw_env.config /var/lock/fw_printenv.lock'
 
+be18000_sysupgrade_dir() {
+	local board
+
+	board="$(board_name)"
+	echo "sysupgrade-${board//,/_}"
+}
+
 be18000_check_sysupgrade() {
 	local image="$1"
-	local board_dir="sysupgrade-xiaomi_be18000"
+	local board_dir="$(be18000_sysupgrade_dir)"
 	local cmd members member dirs
 
 	# The generated sysupgrade image is an uncompressed or gzip tar.
@@ -95,6 +102,7 @@ platform_do_upgrade() {
 		CI_KERNPART="kernel"
 		CI_ROOTPART="rootfs"
 		CI_DATAPART="rootfs_data"
+		CI_BOARD_DIR="$(be18000_sysupgrade_dir)"
 		nand_do_upgrade "$1"
 		;;
 	*)

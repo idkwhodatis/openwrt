@@ -292,7 +292,7 @@ nand_upgrade_ubifs() {
 
 	local root_ubidev="$( nand_find_ubi "${CI_ROOT_UBIPART:-$CI_UBIPART}" )"
 	local root_ubivol="$(nand_find_volume $root_ubidev "$CI_ROOTPART")"
-	$cmd < "$ubifs_file" | ubiupdatevol /dev/$root_ubivol -s "$ubifs_length" -
+	$cmd < "$ubifs_file" | ubiupdatevol /dev/$root_ubivol -s "$ubifs_length" - || return 1
 }
 
 # Write the FIT image to UBI kernel volume
@@ -306,7 +306,7 @@ nand_upgrade_fit() {
 
 	local fit_ubidev="$(nand_find_ubi "${CI_KERN_UBIPART:-$CI_UBIPART}")"
 	local fit_ubivol="$(nand_find_volume $fit_ubidev "$CI_KERNPART")"
-	$cmd < "$fit_file" | ubiupdatevol /dev/$fit_ubivol -s "$fit_length" -
+	$cmd < "$fit_file" | ubiupdatevol /dev/$fit_ubivol -s "$fit_length" - || return 1
 }
 
 # Write images in the TAR file to MTD partitions and/or UBI volumes as required
@@ -315,9 +315,14 @@ nand_upgrade_tar() {
 	local cmd="${2:-cat}"
 	local jffs2_markers="${CI_JFFS2_CLEAN_MARKERS:-0}"
 
-	# WARNING: This fails if tar contains more than one 'sysupgrade-*' directory.
-	local board_dir="$($cmd < "$tar_file" | tar tf - | grep -m 1 '^sysupgrade-.*/$')"
+	# The platform may provide the directory it validated; otherwise use
+	# the first sysupgrade-* directory for compatibility with other boards.
+	local board_dir="${CI_BOARD_DIR:-$($cmd < "$tar_file" | tar tf - | grep -m 1 '^sysupgrade-.*/$')}"
 	board_dir="${board_dir%/}"
+	[ -n "$board_dir" ] || {
+		echo "cannot find sysupgrade directory"
+		return 1
+	}
 
 	local kernel_mtd kernel_length
 	if [ "$CI_KERNPART" != "none" ]; then
@@ -341,7 +346,7 @@ nand_upgrade_tar() {
 			# These devices brick if the kernel partition is erased.
 			# Hence only invalidate kernel for now.
 			dd if=/dev/zero bs=4096 count=1 2> /dev/null | \
-				mtd write - "$CI_KERNPART"
+				mtd write - "$CI_KERNPART" || return 1
 		else
 			ubi_kernel_length="$kernel_length"
 		fi
@@ -354,23 +359,23 @@ nand_upgrade_tar() {
 		local ubidev="$( nand_find_ubi "${CI_ROOT_UBIPART:-$CI_UBIPART}" )"
 		local root_ubivol="$( nand_find_volume $ubidev "$CI_ROOTPART" )"
 		$cmd < "$tar_file" | tar xOf - "$board_dir/root" | \
-			ubiupdatevol /dev/$root_ubivol -s "$rootfs_length" -
+			ubiupdatevol /dev/$root_ubivol -s "$rootfs_length" - || return 1
 	fi
 	if [ "$kernel_length" ]; then
 		if [ "$kernel_mtd" ]; then
 			if [ "$jffs2_markers" = 1 ]; then
-				flash_erase -j "/dev/mtd${kernel_mtd}" 0 0
+				flash_erase -j "/dev/mtd${kernel_mtd}" 0 0 || return 1
 				$cmd < "$tar_file" | tar xOf - "$board_dir/kernel" | \
-					nandwrite "/dev/mtd${kernel_mtd}" -
+					nandwrite "/dev/mtd${kernel_mtd}" - || return 1
 			else
 				$cmd < "$tar_file" | tar xOf - "$board_dir/kernel" | \
-					mtd write - "$CI_KERNPART"
+					mtd write - "$CI_KERNPART" || return 1
 			fi
 		else
 			local ubidev="$( nand_find_ubi "${CI_KERN_UBIPART:-$CI_UBIPART}" )"
 			local kern_ubivol="$( nand_find_volume $ubidev "$CI_KERNPART" )"
 			$cmd < "$tar_file" | tar xOf - "$board_dir/kernel" | \
-				ubiupdatevol /dev/$kern_ubivol -s "$kernel_length" -
+				ubiupdatevol /dev/$kern_ubivol -s "$kernel_length" - || return 1
 		fi
 	fi
 

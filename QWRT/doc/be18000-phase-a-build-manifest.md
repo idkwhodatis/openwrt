@@ -117,17 +117,33 @@ Independent review triage (2026-11-22):
   five seed selections; the full build was performed in the copied WSL
   tree.
 
+NAND upgrade hardening (2026-11-22):
+
+- `nand_upgrade_tar` now honors `CI_BOARD_DIR`.  The Xiaomi
+  `platform_do_upgrade` sets it from `be18000_sysupgrade_dir()`, the
+  same helper used by `platform_check_image`, so validation and
+  flashing select the same `sysupgrade-xiaomi_be18000/` directory.
+- `nand_upgrade_ubifs`, `nand_upgrade_fit` and the tar root/kernel
+  writes now return failure when `ubiupdatevol`, `mtd write`,
+  `nandwrite` or `flash_erase` fails.  `nand_do_upgrade` therefore
+  reports failure instead of success and does not restore the config.
+- The `leds-pwm` container no longer claims `pwm_pins`; `&pwm` is the
+  sole owner of the pin group.
+- Failure injection with a fake failing `ubiupdatevol` makes
+  `nand_upgrade_tar` return 1; a succeeding fake writes root and kernel
+  and returns 0.
+
 ## Artifacts
 
 Artifacts are archived under `QWRT/extracted/be18000-build/`.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,104,852 | `8a7ada4ac87254ab231a313e9af6ef8b4354ad366550fc367e3939cc46343cf8` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `17d350daa7afa77769229210f60d11e9624e990305f5b966489525991678ff98` |
-| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `bf367e97f45adfd4424eb78ec8934be97eb21a1832f3d89538ec295b2ad45aa1` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-initramfs-uImage.itb` | 18,104,860 | `7bf106606abad8a78da9ab10c712fd8bde478fd8b4b630ed4bf73d4f139816ba` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-factory.ubi` | 17,039,360 | `2d47ab43686f18c703ea58fc697e0aea4fd8fac80326ccba9f69dbd652cbd0c4` |
+| `openwrt-qualcommbe-ipq95xx-xiaomi_be18000-squashfs-sysupgrade.bin` | 16,097,541 | `aa2fced9057bbe50f0d199778a699a355cdbb26f05ad188b9c22f14cfd5d1022` |
 | `openwrt-qualcommbe-ipq95xx-xiaomi_be18000.manifest` | 4,471 | `7f22d11663e8815013c4c01f63caba77cc71fb3d051784193e81a5251d950823` |
-| `profiles.json` | 2,123 | `2f9b2e2d2af0d6e6962edd0c459bda98f5788a0ad1f6b5c31e5afd10df6d8df1` |
+| `profiles.json` | 2,123 | `487834e4bb2cd4515b8a33f853e57b3fb1bdb41e758c78009fd16dc35797581c` |
 | `config.buildinfo` | 152 | `b65255fd8dbd33a196f1aad512d07e5c8a28188de75c82bb25561d2447abc4b3` |
 
 ## FIT inspection
@@ -139,7 +155,7 @@ Both the standalone initramfs FIT and the kernel volume inside
 - Kernel compression: gzip
 - Load/entry: `0x42080000`
 - FDT description: `xiaomi_be18000`
-- FDT size: 42,827 bytes
+- FDT size: 42,791 bytes
 
 The embedded board DTB reports:
 
