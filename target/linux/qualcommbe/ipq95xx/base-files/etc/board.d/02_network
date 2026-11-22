@@ -23,6 +23,12 @@ ipq95xx_setup_interfaces()
 	qcom,ipq9574-ap-al02-c7)
 		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4 lan5" "wan"
 		;;
+	xiaomi,be18000)
+		# Four QCA8084 2.5G copper ports are LAN, the AQR113C port
+		# is WAN and the SFP+ port is added only after its module
+		# path is validated.
+		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "wan"
+		;;
 	*)
 		echo "Unsupported hardware. Network interfaces not initialized"
 		;;
@@ -40,6 +46,11 @@ ipq95xx_setup_wlan()
 	case "$board" in
 	askey,sbe1v1k)
 		ucidef_add_wlan "$DEV_PATH_PCIE0" "$DEV_PATH_PCIE1" "$DEV_PATH_PCIE2"
+		;;
+	xiaomi,be18000)
+		# pcie1 = 2.4G (domain 1), pcie2 = 5G (domain 2),
+		# pcie3 = 6G (domain 3).
+		ucidef_add_wlan "$DEV_PATH_PCIE0" "$DEV_PATH_PCIE2" "$DEV_PATH_PCIE1"
 		;;
 	esac
 }

@@ -1,11 +1,275 @@
 # BE18000 mainline OpenWrt port plan
 
-Planning document, 2026-11-16. This is the implementation plan for the modified
-Xiaomi BE18000 on the mainline `qualcommbe/ipq95xx` target, not a flash
-procedure. The live router is not currently reachable from this PC (the PC is
-disconnected; `10.10.10.1` currently presents a different LuCI host), so the
-first phases are offline build/design work. Do not flash without a recovery
-path and hardware access.
+## Implementation sequence for the modified BE10000
+
+Updated 2026-11-21. The target is the owner's hardware-converted BE10000,
+identified by the running QWRT 5.4.250 system as `xiaomi,be18000`.
+Keep that identity through DTS, firmware selection, image metadata and
+upgrade checks. The stock BE10000 uses a different radio profile.
+QSDK13 is an installer reference. The working 5.4.250 image is the
+behavioral baseline. The Phase A offline build and image-layout
+inspection are complete; see the
+[Phase A build manifest](be18000-phase-a-build-manifest.md). No
+hardware gate below has passed yet. Use this sequence to execute the
+port; sections 1–12 preserve the
+earlier design and research, including hypotheses superseded here.
+
+### Delivery and dependencies
+
+| Patch group | Deliverable | Gate before proceeding |
+|---|---|---|
+| A | Reproducible build and board-specific RAM FIT | Inspect generated FIT and DTB; verify console and a RAM boot path |
+| B | Bootable board DTS, cooling and one copper LAN | Cold boot, serial shell and wired management with QWRT still bootable |
+| C | Remaining copper ports, WAN and board peripherals | Validate each jack, PHY, rate, MAC, thermal behavior and reboot |
+| D | Per-radio PCI topology, firmware and board data | Identify each endpoint and exact board match; single-radio bring-up |
+| E | Conditional ath12k cold-calibration support | Verify calibration completion, memory lifetime, restart and mission operation |
+| F | NAND installation and sysupgrade | Recovery rehearsal, image-layout checks and explicit authorization for writes |
+| G | Opt-in MLO and release qualification | Repeatable single-band operation, recovery and sustained load |
+
+Develop D/E in parallel with wired work offline. B precedes radio testing
+so a firmware failure cannot take away the only management connection.
+F can qualify a separately labeled wired-only image after C. A full
+BE18000 support claim requires D/E and the release tests in G.
+
+### A. Freeze the baseline and build a RAM-only image
+
+1. Use a Linux build host or WSL2 on its native Linux filesystem. Record
+   the fork commit, feed commits, toolchain and configuration diff.
+   The local QWRT and QSDK trees contain ignored artifacts; inventory
+   the required DTB, BDF, regdb and recovery files and verify hashes
+   before assuming a clean checkout can reproduce a build. Keep
+   device-specific partition backups outside the distributable image.
+2. Add `target/linux/qualcommbe/dts/ipq9574-xiaomi-be18000.dts` and
+   `Device/xiaomi_be18000` in `target/linux/qualcommbe/image/ipq95xx.mk`.
+   Explicitly set DEVICE_DTS, SOC, vendor/model, gzip FitImage,
+   KERNEL_LOADADDR=0x42080000 and DEVICE_DTS_CONFIG=config@al02-c4.
+   Reference RDP433 for SoC resources and the live Xiaomi DT for board
+   wiring. Start with a single board file; factor a common DTSI when
+   a second board has independently verified shared nodes.
+3. Use a device-only build configuration selecting qualcommbe, ipq95xx,
+   xiaomi_be18000 and TARGET_ROOTFS_INITRAMFS. In the fork,
+   KERNEL_INITRAMFS inherits KERNEL. Verify that inheritance actually
+   produces the required initramfs FIT. Keep early networking wired
+   and omit the radio driver from this test image. Suppress persistent
+   image publication during bring-up.
+
+   ```sh
+   ./scripts/feeds update -a
+   ./scripts/feeds install -a
+   make menuconfig
+   make defconfig
+   ./scripts/diffconfig.sh
+   make download -j8
+   make -j"$(nproc)" V=s
+   ```
+
+   Pin feed revisions for repeat builds. Locate the emitted initramfs
+   under bin/targets/qualcommbe/ipq95xx. Inspect with dumpimage and
+   decompile the embedded DTB. Check the selected configuration, kernel
+   compression, load/entry, compatible, console, memory boundaries and
+   actual initramfs content. Check for overlap with bootloader scratch,
+   reserved memory and the staging address chosen for RAM loading.
+4. Confirm a working serial console and bootloader interrupt on the
+   actual unit. Identify a RAM load/boot command supported by that
+   bootloader and verify how to return to the installed QWRT. Web
+   recovery availability alone does not establish its accepted image
+   format. Do not attempt the first boot remotely over the serving Wi-Fi.
+   **Pass:** boot the test FIT from RAM, reach a serial shell, verify the
+   root filesystem is the initramfs, then return to the original system.
+
+### B/C. Bring up the board and Ethernet
+
+1. Stage UART, interrupt controller, RAM/reservations, pinctrl, clocks,
+   watchdog and TSENS. Compare the boot log and reported memory against
+   the modified unit. Add I²C sensor/fan control early enough to monitor
+   cooling under load. Establish working fan response before radio or
+   throughput stress. Enable NAND initially for identification and
+   read-only layout comparison; check every protected partition against
+   the unit's MIBIB before enabling production writes.
+2. Implement MDIO and QCA8084 as a package. Model GPIO60 reset ownership
+   once; explicitly evaluate the vendor's roughly 100 ms assert and
+   post-release delays. Instantiate the NSSCC provider, reference clock,
+   four explicit Clause 22 PHY IDs 004d.d180, address fixup 1–7 and
+   per-PHY GEPHY clock/reset pairs. Use the fork's patches 0301–0312
+   and the BE7000 draft to check bindings. A DT-created ID can appear
+   before the hardware answers. Check actual ID-register reads at 1–4,
+   clock/reset errors, then carrier from a power-off start.
+3. Route PPE ports 1–4 through PCS0 channels 0–3; test the Xiaomi
+   four-channel 10g-qxgmii configuration. Port 5 uses PCS1 channel 0,
+   USXGMII and AQR113C at Clause 45 address 0. Inspect the modified
+   unit's ETHPHYFW MBN and expose its validated payload as the AQR
+   firmware NVMEM cell if required. Preserve bootloader-loaded firmware.
+   Port 6 uses PCS2 channel 0. Validate the SFP management bus and
+   module/link signals independently; 0x1e in QSDK's I²C mode can be a
+   synthetic MDIO address. Verify GPIO64 function before assigning it.
+4. Add the Xiaomi case in ipq95xx/base-files/etc/board.d/02_network.
+   Map Linux port labels to the intended four copper LANs, copper WAN
+   and SFP LAN only after matching physical jacks. Verify stable and
+   distinct MACs across cold boots against the saved unit. Add LEDs
+   and reset key by observed polarity and function. Defer NFC until its
+   binding and userspace purpose are established.
+5. **Pass:** serial plus wired SSH, DHCP and switch/bridge behavior;
+   exercise each copper jack individually and check negotiated rates
+   with capable peers, RX/TX counters and bidirectional traffic. Verify
+   10G WAN, SFP module detect/link, fan response and reboot separately.
+   Record untested rates or peripherals rather than declaring them passed.
+
+### D. Establish the radio/firmware baseline before changing ath12k
+
+1. Enable PCIe controllers one at a time. Map controller, PERST, lanes,
+   negotiated width, endpoint, DT node and physical band. Live QWRT
+   calls the 6 GHz radio PCI3; wifi2 enumerates at 0004:01:00.0 there.
+   Mainline may assign a different domain. Bind variants to the
+   actual device nodes instead of hard-coding the vendor domain.
+2. Use a local ipq-wifi board package following
+   `package/firmware/ipq-wifi/Makefile`. Decode the generated board-2
+   archive and verify names, lengths and hashes of all three BDFs and
+   the regdb against the saved live artifacts. Use variants
+   Xiaomi_BE18000_live_1, _2 and _4 for 2.4, 5 and 6 GHz respectively,
+   with QMI chip ID 0 and board ID 255. The live PCI3 BDF is 102,400
+   bytes (SHA-256 prefix bd911abb719fbcae). Check actual installed
+   firmware paths and package collisions. Resolve redistribution rights
+   before publishing proprietary device files; a private test package
+   can use owner-supplied artifacts.
+3. Use the fork's pinned mac80211/backports 7.2, patch 700 and the
+   QCN9274 firmware package as a compatibility experiment for the QCN9224
+   endpoint. Capture PCI match, firmware API/build, QMI target caps,
+   board key, fallback attempts, chosen payload, memory requests and
+   service readiness. If firmware fails before board lookup, resolve
+   hardware/API compatibility first. If the lookup falls back, correct
+   the variant or packaging before changing calibration behavior.
+4. Inspect `11-ath12k-caldata` file requests for each controller. The
+   Askey MMC extractor does not supply Xiaomi calibration. Exclude the
+   erased high-band ART slices and zero host caches. Verify the 2.4 GHz
+   input separately. Keep all three vendor BDFs distinct from per-unit
+   calibration. **Pass:** reproducible endpoint and board selection
+   for each radio with wired management maintained.
+
+### E. Implement and test the cold-calibration handshake
+
+Use a separate, device/firmware-scoped mac80211 patch series for the
+experiment. The live vendor uses subsystem/remoteproc put/get; QSDK13
+on PCI uses HIF put/get. Port the protocol requirements through ath12k's
+own PCI/QMI lifecycle. Neither vendor reset mechanism by itself defines
+the correct reset sequence for mainline firmware.
+
+| Point in backports 7.2 | Implementation and evidence to collect |
+|---|---|
+| PCI probe and first HOST_CAP | Track calibration per ath12k_base. Start with cal_done=0 and the radio-specific BDF. Confirm that PCI3 actually requests CALDB type 4. Gate the feature on tested hardware/firmware capability. |
+| qmi.c memory-request handling | Ordinary PCI can allocate coherent DMA. Record type, requested length, address and acknowledgement on each pass. The vendor 0x59100000/8 MiB window is a reference. Introduce fixed addressing only with evidence the candidate firmware needs it and a validated memory layout. |
+| First FW_READY and core firmware start | Insert the calibration pass before ordinary MAC/group registration. Send the supported calibration mode (vendor 7), handle rejection/timeout, and allow unrelated targets to use the existing normal path. |
+| CAL_DONE and worker scheduling | Decode the firmware indication, correlate it with the active device and boot attempt, and set ab->qmi.cal_done before waking restart work. Ignore stale/duplicate events. Queue restart outside the QMI event handler so the handler can process responses. |
+| OFF and controlled restart | Require successful OFF, then perform the least disruptive firmware-supported transition. Preserve the valid CALDB backing and ownership until mission negotiation finishes. Serialize removal, recovery, timeout and grouped probe so failure cannot leave a ready radio or a stale DMA reference. |
+| Second HOST_CAP and memory request | The sender already serializes cal_done. Expect TLV 0x1a to transition 0→1 while valid backing survives. Check the second segment list/size and response address. If backing is freed, replaced or invalidated, clear the bit and abort or restart calibration. |
+| Mission and cleanup | Enter NORMAL once, complete the normal WMI/HTT/mac80211 path, and publish the radio to its group only on success. Clear state on abandoned attempts and final teardown. Keep diagnostic payload capture narrowly scoped to bring-up. |
+
+**Acceptance:** reproduce the full sequence on a cold start for each
+radio; demonstrate PCI3 standalone 6 GHz association and bidirectional
+traffic on a permitted channel at supported widths. Exercise rejected
+mode, timeout, second-boot failure, unload and recovery. The live ring
+confirms CAL_DONE followed by HOST_CAP but omits TLV bytes. Distinguish
+host advertisement, firmware startup and actual coefficient use in
+test results. A firmware restore indication or equivalent RF validation
+is stronger evidence than association alone. If the candidate firmware
+cannot support the required sequence, keep wired support independently
+usable and report the radio limitation.
+
+### F. Build persistent images and qualify the upgrade path
+
+Use Device/UbiFit only for the NAND stage. Check the live working
+geometry (128 KiB erase, 2 KiB page), subpage size, VID header offset,
+volume names/IDs and available eraseblocks against generated UBI headers.
+Budget bad blocks and rootfs_data growth. For the installed root, the
+fork's generic kernel already consumes /chosen/bootargs-append; derive
+the root argument from the generated layout. Keep that argument off the
+RAM-only boot path if it would select flash. No shared FIT-tool change is
+currently required.
+
+Implement explicit Xiaomi dispatch and preflight in
+ipq95xx/base-files/lib/upgrade/platform.sh. Inspect the tar members,
+board metadata, target MTD and UBI volumes, and route through the NAND
+helper whose volume behavior matches the board. The current default
+dispatch is unsuitable as an unverified fallback. Reject wrong-board,
+oversized and malformed images before mutating storage. Validate the
+generated UBI and sysupgrade tar offline. Rehearse RAM recovery and
+verify restorable backups, hashes and partition boundaries before the
+separately authorized installation test. Exercise clean install,
+config-preserving upgrade and return to recovery with serial logs.
+**Pass:** both bootloader and Linux locate the intended kernel/rootfs,
+overlay persists, and protected partition hashes remain unchanged.
+
+### G. Integrate MLO and qualify release scope
+
+Model the PCIe/WSI partner graph after all three standalone radios
+pass. Verify IDs and partner links against the modified-unit DT.
+Start with 5+6 GHz opt-in, exercise client reconnect, single-link loss,
+channel changes and firmware recovery, then test concurrent wired and
+wireless load for 24 hours. Check temperature, fan behavior, error
+counters, watchdog resets and memory growth. Qualify pstore only after
+its reservation is checked against PCI/CALDB/MLO ranges. Archive the
+build manifest, FIT/DTB inspection, serial boot logs, per-radio QMI
+results, negotiated links, upgrade/recovery results and unresolved
+items per image revision. Mark wired-only, standalone tri-band and MLO
+milestones separately so downstream users know what was tested.
+
+**Next implementation unit:** the serial and RAM-FIT gate of A now has
+an inspected offline image; see the
+[Phase A build manifest](be18000-phase-a-build-manifest.md).  The next
+step is hardware: confirm the serial console, boot the FIT from RAM and
+return to the installed QWRT.  After that, implement the minimal
+UART/clock and one-copper-LAN portion of B.  The latest [live PCI3 verification](be10000-be18000-openwrt-gap-rounds.md#live-verification-of-the-pci3-return-path-and-caldb-mapping)
+and [HOST_CAP trace limits](be10000-be18000-openwrt-gap-rounds.md#can-the-existing-live-traces-recover-the-two-cal_done-tlvs)
+are the evidence baseline for D/E.
+
+### Phase A/B implementation checkpoint (2026-11-21)
+
+The first implementation unit is in the tree:
+
+- `target/linux/qualcommbe/image/ipq95xx.mk` defines
+  `Device/xiaomi_be18000` with gzip `Device/FitImage`, `Device/UbiFit`,
+  `KERNEL_LOADADDR=0x42080000`, `DEVICE_DTS_CONFIG=config@al02-c4` and
+  the live NAND geometry (`BLOCKSIZE=0x20000`, page/subpage 2048,
+  `VID_HDR_OFFSET=2048`, `IMAGE_SIZE=0xbe00000`).
+- `target/linux/qualcommbe/dts/ipq9574-xiaomi-be18000.dts` carries the
+  `xiaomi,be18000` identity, serial console, reserved-memory, the live
+  28-entry MIBIB partition table, `0:ART`/`0:ETHPHYFW` nvmem cells,
+  GPIO LEDs/buttons, PWM RGB, LM63/EMC2305 I2C devices and the ramoops
+  reservation. QCA8084/PPE and PCIe/WSI stay staged for the next units.
+- `package/firmware/ipq-wifi-xiaomi-be18000/` installs the live
+  `board-2.bin` (292,256 bytes, SHA-256
+  `0fcbb66e0a229bafc2bad9dd7cc8a5488134f4808673e73cd2808437849ab9e6`).
+  It uses `install-overlay`, like `ipq-wifi`, so it overrides the
+  official QCN9274 board data without an APK file-ownership conflict.
+  It remains a local package until the BDF redistribution rights are
+  resolved.
+- `02_network`, `platform.sh` and the existing
+  `uboot-envtools/qualcommbe_ipq95xx` board script now have explicit
+  `xiaomi,be18000` cases. The upgrade path keeps `kernel`/`rootfs`/
+  `rootfs_data` as the NAND volumes and copies the UBI tools into the
+  RAM recovery environment. `fw_env` uses `0:APPSBLENV` offset 0,
+  0x40000 env, 0x20000 sectors, two sectors.
+- `package/kernel/mac80211/ath.mk` now declares `+kmod-mhi-bus` for
+  `kmod-ath12k`; the backports 7.2 module links `mhi.ko` but the
+  package dependency was missing.
+- Static checks: the board DTS preprocesses and compiles to a
+  31,873-byte DTB with `chosen/bootargs-append = " root=/dev/ubiblock0_1"`,
+  the expected compatible string and the `rootfs` partition present;
+  shell syntax checks pass for the new board and upgrade scripts.
+- Build environment: WSL2 Ubuntu tree at `/home/leaf/be18000-build`,
+  target `qualcommbe/ipq95xx`, `CONFIG_TARGET_ROOTFS_INITRAMFS=y`.
+  The copied tree has no `.git`, so the build sets `REVISION=be18000`;
+  otherwise base-files would carry the invalid APK version
+  `...~unknown`.
+- Offline build result: `make REVISION=be18000 -j16 V=s` completed with
+  rc 0.  The 37,881-byte board DTB, FIT `config@al02-c4`, gzip
+  `0x42080000`, UBI `kernel`/`rootfs`/`rootfs_data` with
+  `rootfs_data` autoresize, and the 292,256-byte live board-2
+  (SHA-256 `0fcbb66e...`) are all present in the generated images.
+  Full hashes and inspection output are in the
+  [Phase A build manifest](be18000-phase-a-build-manifest.md).  The
+  next gate is hardware: serial console and RAM FIT boot before any
+  NAND write.
+
 
 ## 1. Objective and non-goals
 
@@ -75,7 +339,7 @@ The mainline `qcom_rdp433` (AP-AL02-C4) is the same board family as the live
    sbe1v1k; Xiaomi must not extract blank high-band ART caldata.
 6. No Xiaomi `ipq-wifi` package/board-2 file in the tree.
 7. `ath12k` coldboot CALDB has no fixed DT region: `CALDB_MEM_REGION_TYPE`
-   sets paddr=0, although the same path also allocates a DMA chunk. Whether
+   gets address zero on the fixed-memory branch. Ordinary PCI uses DMA. Whether
    the QCN9224 firmware requests CALDB and accepts a DMA paddr is unproven.
 8. `config-6.18` lacks pstore/ramoops/SFP/PWM/hwmon/watchdog options needed
    for the full board.
@@ -99,7 +363,7 @@ The mainline `qcom_rdp433` (AP-AL02-C4) is the same board family as the live
 
 1. Add `Device/xiaomi_be18000` to
    `target/linux/qualcommbe/image/ipq95xx.mk`.
-2. Add `target/linux/qualcommbe/dts/ipq9574-be18000.dts` skeleton:
+2. Add `target/linux/qualcommbe/dts/ipq9574-xiaomi-be18000.dts` skeleton:
    model/compatible, `chosen`, reserved-memory, NAND partitions, UBI, board
    I/O, PCIe nodes (initially `status = "disabled"` for WiFi), PPE/MDIO
    (initially disabled if needed).
@@ -126,7 +390,7 @@ define Device/xiaomi_be18000
 	DEVICE_VENDOR := Xiaomi
 	DEVICE_MODEL := BE18000
 	DEVICE_VARIANT := Pro Max
-	DEVICE_DTS := ipq9574-be18000
+	DEVICE_DTS := ipq9574-xiaomi-be18000
 	DEVICE_DTS_CONFIG := config@al02-c4
 	DEVICE_DTS_DIR := ../dts
 	KERNEL_LOADADDR := 0x42080000
@@ -309,11 +573,9 @@ RDP433 reference partition table.
 ### Calibration
 
 - 2.4G: live BDF/ART may be usable; test.
-- 5G/6G: high-band ART blank; use coldboot CALDB:
-  - reserve the three 50 MiB QCN9224 regions;
-  - add `qcom,caldb-offset = <0x1e00000>` (8 MiB caldb inside each region);
-  - patch ath12k `CALDB_MEM_REGION_TYPE` to use the host region base + offset
-    instead of 0.
+- 5G/6G: the high-band ART slots are blank. Trace PCI CALDB negotiation,
+  the mode-7 trigger and completion before choosing a memory layout.
+  QSDK's 8 MiB windows at base + 0x1e00000 are reference values.
 - Do not install blank ART slices, zero cache files, or the unused 6G gain LUT.
 
 ## 7. Install and recovery
@@ -357,7 +619,7 @@ RDP433 reference partition table.
 | AQR113C firmware/MBN | no 10G | use `0:ETHPHYFW` NVMEM `aqr_fw@28`/0x60002; mainline driver validates the payload; U-Boot already loads it |
 | High-band calibration | no 5G/6G | coldboot CALDB; do not use blank ART; test whether firmware requests CALDB before adding a fixed region patch |
 | QCN9224 vs QCN9274 firmware | WiFi probe fail | official QCN9274 `firmware-2.bin` first; wrap QSDK13 QCN9224 AMSS/M3 only as a fallback |
-| U-Boot FIT/UBI | no boot / no rootfs | live 0x42080000/gzip/config@al02-c4 **and** FIT `append-bootargs` for `root=/dev/ubiblock0_1`; web recovery |
+| U-Boot FIT/UBI | no boot / no rootfs | live 0x42080000/gzip/config@al02-c4 **and** board DT root argument verified against generated UBI; web recovery |
 | NAND/UBI params | corrupt rootfs | verify stock UBI; back up ART/ETHPHYFW; recovery initramfs + `ubiformat` |
 | Install path | bricked rootfs | do not assume the web recovery accepts raw `factory.ubi`; use serial/TFTP recovery initramfs |
 | SFP port 6 | no SFP | defer; `sfp` node/PHY 0x1e/reset GPIO64/`pcs2_ch0` |
@@ -428,7 +690,7 @@ granular evidence and corrections.
   model string; do not use `RC01` for `board_name`.
 - OpenWrt `board_name` is derived from the first DTS compatible. The scripts
   must use `xiaomi,be18000`, not the QSDK model or `RC01`.
-- `DEVICE_DTS` must be `ipq9574-be18000`, `SOC` `ipq9574`, and
+- `DEVICE_DTS` must be `ipq9574-xiaomi-be18000`, `SOC` `ipq9574`, and
   `DEVICE_DTS_CONFIG` `config@al02-c4`; the live FIT config is
   `config@al02-c4`, not the target default `config@1`.
 
@@ -440,7 +702,7 @@ granular evidence and corrections.
   The AP-AL02-C4 string is retained for board-family matching; the first
   string is the OpenWrt board name.
 - Fix `DEVICE_VENDOR := Xiaomi`, `DEVICE_MODEL := BE18000`,
-  `DEVICE_VARIANT := Pro Max`, `DEVICE_DTS := ipq9574-be18000`,
+  `DEVICE_VARIANT := Pro Max`, `DEVICE_DTS := ipq9574-xiaomi-be18000`,
   `DEVICE_DTS_CONFIG := config@al02-c4`, `SOC := ipq9574`.
 - Use `xiaomi,be18000` in `02_network`, `platform.sh`, `11-ath12k-caldata`,
   and any board-specific hotplug/uci-defaults case.
@@ -1197,11 +1459,10 @@ and use it on PPE port 5 with `phy-mode = "usxgmii"` and
 - First test the official QCN9274 `firmware-2.bin` and capture the QMI
   target-memory request types. If `CALDB_MEM_REGION_TYPE` appears, confirm
   the DMA chunk allocation and the coldboot completion message.
-- If CALDB is not requested, implement the fixed path: add the
-  `qcom,caldb-addr`/`qcom,caldb-size` properties to each `wifi@0` (or a
-  `qcom,caldb-offset = <0x1e00000>` relative to the 50 MiB region) and
-  patch `ath12k_qmi_assign_target_mem_chunk()` to set the CALDB paddr from
-  the reserved region instead of zero.
+- If CALDB is absent from the request, trace firmware capabilities and the
+  host mode decision. If it is present, inspect the PCI DMA response
+  before considering fixed addressing. The [mode and memory trace](be10000-be18000-openwrt-gap-rounds.md#pci3-mode-7-caldb-handoff-and-return-to-service)
+  identifies the separate completion and reprobe steps.
 - Keep the 8 MiB caldb size and the addresses `0x52d00000`/`0x55f00000`/
   `0x59100000`; do not overlap the 18 MiB MLO area or the 50 MiB region
   boundary.
@@ -1493,9 +1754,12 @@ xiaomi,be18000)
 - Extend `RAMFS_COPY_BIN` with the NAND tools actually used by `nand.sh`:
   `ubiformat ubiattach ubidetach ubimkvol ubirmvol ubinfo nanddump mtd`
   (keep the existing `fw_printenv fw_setenv head cmp sha256sum tr mktemp`).
-- Add a Xiaomi `/etc/fw_env.config` entry for the `0:APPSBLENV` mtd with
-  the live 0x40000 env size and sector size; use `find_mtd_index` or the
-  correct mtd index, and verify `fw_printenv` before any `fw_setenv`.
+- Extend the existing
+  `package/boot/uboot-tools/uboot-envtools/files/qualcommbe_ipq95xx`
+  script instead of adding a second `30_uboot-envtools` file (which
+  would collide with the `uboot-envtools` package). Use
+  `ubootenv_add_mtd "0:APPSBLENV" "0x0" "0x40000" "0x20000" "2"` and
+  verify `fw_printenv` before any `fw_setenv`.
   Do not write the blank `0:BOOTCONFIG` partitions.
 - `platform_copy_config`: no Xiaomi special case is required; the NAND
   upgrade path preserves config in `rootfs_data`. Validate a
@@ -1567,18 +1831,23 @@ DEVICE_PACKAGES := \
 	kmod-qcom-ppe kmod-pcs-qcom-ipq9574 \
 	kmod-sfp \
 	kmod-hwmon-emc2305 kmod-hwmon-lm63 \
-	kmod-leds-pwm kmod-input-gpio-keys kmod-i2c-core \
+	kmod-leds-pwm kmod-i2c-core \
 	kmod-pstore kmod-ramoops
 ```
+
+- The target `DEFAULT_PACKAGES` already provides
+  `kmod-gpio-button-hotplug`, which binds the `gpio-keys` compatible.
+  Do not add `kmod-input-gpio-keys` as well: both drivers claim the same
+  node and only one can probe.
 
 - Do not add `kmod-phy-aquantia` or `kmod-phy-qca808x` unless a build
   conflict shows the config-default `=y` is not being honored. The AQR and
   QCA808x drivers are built-in via `CONFIG_AQUANTIA_PHY=y` and
   `CONFIG_QCA808X_PHY=y`.
 - Add `kmod-pstore` + `kmod-ramoops`, `kmod-sfp`, `kmod-leds-pwm`,
-  `kmod-hwmon-emc2305`, `kmod-hwmon-lm63`, `kmod-input-gpio-keys`, and
-  `kmod-i2c-core` so the missing `CONFIG_PSTORE`/`CONFIG_SFP`/
-  `CONFIG_SENSORS_*`/`CONFIG_LEDS_PWM` options are generated by the
+  `kmod-hwmon-emc2305`, `kmod-hwmon-lm63`, and `kmod-i2c-core` so the
+  missing `CONFIG_PSTORE`/`CONFIG_SFP`/`CONFIG_SENSORS_*`/
+  `CONFIG_LEDS_PWM` options are generated by the
   package KCONFIG. Keep `kmod-hwmon-pwmfan` optional; the live fan is the
   EMC2301.
 - Image contents: FIT `config@al02-c4`, gzip, load/entry `0x42080000`,

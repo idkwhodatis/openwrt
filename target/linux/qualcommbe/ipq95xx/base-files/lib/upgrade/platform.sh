@@ -1,7 +1,7 @@
 PART_NAME=firmware
 REQUIRE_IMAGE_METADATA=1
 
-RAMFS_COPY_BIN='fw_printenv fw_setenv head cmp sha256sum tr mktemp'
+RAMFS_COPY_BIN='fw_printenv fw_setenv head cmp sha256sum tr mktemp ubiformat ubiattach ubidetach ubimkvol ubirmvol ubinfo nanddump mtd'
 RAMFS_COPY_DATA='/etc/fw_env.config /var/lock/fw_printenv.lock'
 
 platform_check_image() {
@@ -11,6 +11,12 @@ platform_check_image() {
 			echo "LN6001 A/B preflight failed" >&2
 			return 1
 		}
+		return 0
+		;;
+	xiaomi,be18000)
+		# The sysupgrade tar is checked for metadata by the generic
+		# path; the factory.ubi is a ubiformat recovery image and is
+		# deliberately not accepted here.
 		return 0
 		;;
 	*)
@@ -34,6 +40,12 @@ platform_do_upgrade() {
 		;;
 	linksys,ln6001)
 		ln6001_do_upgrade "$1" || return 1
+		;;
+	xiaomi,be18000)
+		CI_KERNPART="kernel"
+		CI_ROOTPART="rootfs"
+		CI_DATAPART="rootfs_data"
+		nand_do_upgrade "$1"
 		;;
 	*)
 		default_do_upgrade "$1"

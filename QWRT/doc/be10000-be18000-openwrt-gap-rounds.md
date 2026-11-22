@@ -30,7 +30,7 @@ The two firmware generations are not interchangeable:
   blank, coldboot calibration, 2 GiB in the live DT.
 - **BE10000**: QWRT 25.12.2 / QSDK 12.5, standard BE10000 profile, 3x
   QCN62xx family (2.4G/5G/5G), BDFs `bdwlan.b01/b02/b04`, variants
-  `Xiaomi_BE10000_1/4/2`, ART caldata at 0x58800/0x8A800/0xBC800,
+  `Xiaomi_BE10000_1/4/2`, candidate ART slots at 0x58800/0x8A800/0xBC800,
   QWRT DTB hardcodes 1 GiB (retail hardware is 2 GiB).
 
 The BE10000 README and `BE10000-vs-AL02C4.md` are extraction notes, not
@@ -87,8 +87,7 @@ definition.
 **Gap and plan.** Add a shared Xiaomi image baseline: `Device/FitImage` +
 `Device/UbiFit`, `KERNEL_LOADADDR=0x42080000`, gzip, `config@al02-c4`,
 `BLOCKSIZE=0x20000`, `PAGESIZE=2048`, `SUBPAGESIZE=2048`,
-`VID_HDR_OFFSET=2048`, and a FIT-root `append-bootargs` for
-`root=/dev/ubiblock0_1`. Then add two device wrappers:
+`VID_HDR_OFFSET=2048`, and board-specific `/chosen/bootargs-append` after verifying the generated rootfs volume ID. Then add two device wrappers:
 `xiaomi_be10000` with BE10000 DTS/config and `xiaomi_be18000` with the
 modified DTS/config. The BE10000 image rootfs is 56.6 MiB; the BE18000
 rootfs volume is 49.2 MiB in a 190 MiB partition; both fit `UbiFit` but
@@ -180,12 +179,13 @@ detects the `APPSBLENV` mtd and writes `/etc/fw_env.config` with a fixed
 `append-bootargs`; `include/image-commands.mk` has no `-b` option.
 `platform.sh` has no Xiaomi case; `uboot-envtools` is in the target
 defaults. The live BE18000 FIT proves the config/load/gzip layout, but
-the QSDK `chosen/bootargs-append` is not a mainline consumer.
+this fork's generic 6.18 patch 920 appends the chosen property to the
+kernel command line. QSDK U-Boot separately reads FIT-root
+`append-bootargs` in `cmd_bootqca.c`.
 
-**Gap and plan.** Add a common FIT-root `append-bootargs` path (extend
-`Build/fit-its`/`mkits.sh` with a device variable) and use
-`root=/dev/ubiblock0_1`, with optional `swiotlb=1 coherent_pool=2M`; do
-not include `cnss2`. Add a Xiaomi `fw_env.config`/`30_uboot-envtools`
+**Gap and plan.** Use the board DTS for the root argument. Preserve the
+leading space and check the generated UBI volume ID before selecting
+`root=/dev/ubiblock0_1`. Add a Xiaomi `fw_env.config`/`30_uboot-envtools`
 equivalent for the `APPSBLENV` mtd and a `platform.sh` NAND case. For
 recovery, use a serial/TFTP initramfs and `ubiformat`; do not rely on the
 web recovery accepting a raw `factory.ubi`. Check the secure-boot fuse
@@ -260,8 +260,7 @@ uses PHY 0 and the AQR is bound to the `Aquantia AQR113C` driver.
 **Probe QWRT BE10000 firmware.** The standard BE10000 uses AQR113C at
 C45 0, `partition-0-ethphyfw` with `aqr-fw@0`, and a (Netgear)
 `AQR-G4_v5.6.7-AQR_VER1990.cld` in the extraction. The README says the
-stock NAND `0:ethphyfw` is the source; the modified BE18000 has the Xiaomi
-PSDAdj image instead. Port 5 is the WAN AQR.
+stock NAND `0:ethphyfw` is the source. The stock partition header, payload and running version remain unverified. Port 5 is the WAN AQR.
 
 **Compare with OpenWrt.** `config-default` has `CONFIG_AQUANTIA_PHY=y`;
 the target patch `0350` adds `nvmem-cells = <&aqr_fw>` /
@@ -270,8 +269,7 @@ the cell, validates CRC/header, and falls back to `firmware-name`. There
 is no Xiaomi/ BE10000 DTS cell.
 
 **Gap and plan.** Add the `0:ETHPHYFW` nvmem layout per device:
-BE18000 at 0x28/0x60002 (Xiaomi payload); BE10000 at 0x28/0x60002
-(stock payload). Add the AQR PHY node and port 5 `usxgmii`. Do not
+BE18000 at 0x28/0x60002 (Xiaomi payload); BE10000 bounds pending a stock partition header. Add the AQR PHY node and port 5 `usxgmii`. Do not
 substitute the Netgear VER1990 cld for the live Xiaomi image; do not
 package either cld as the primary firmware. Keep the driver built-in
 (`CONFIG_AQUANTIA_PHY=y`) and test the 10G link and firmware version.
@@ -284,8 +282,7 @@ package either cld as the primary firmware. Keep the driver built-in
 `QCA SFP` with `phy_id 0xaaaabbbb`; there is no direct i2c4 EEPROM node.
 
 **Probe QWRT BE10000 firmware.** The BE10000 README says SFP EEPROM is on
-`i2c@78b9000` (i2c4), reset/TX-disable GPIO64, and the `sff,sfp` model
-is appropriate; QWRT ships `rpcd/ucode/sfp-info.uc` and the SFP LED
+`i2c@78b9000` (i2c4), and proposes an `sff,sfp` model. The vendor port node names GPIO64 as PHY reset; QWRT ships `rpcd/ucode/sfp-info.uc` and the SFP LED
 GPIO62. `port_phyinfo` still lists PHY 0x1e for the QSDK switch port.
 
 **Compare with OpenWrt.** `kmod-sfp` (`CONFIG_SFP`, `CONFIG_MDIO_I2C`,
@@ -294,8 +291,7 @@ GPIO62. `port_phyinfo` still lists PHY 0x1e for the QSDK switch port.
 node; `config-6.18` has no `CONFIG_SFP`.
 
 **Gap and plan.** Treat the two SFP implementations separately:
-BE10000 gets an `sff,sfp` node on `blsp1_i2c4` with GPIO64
-reset/TX-disable and the i2c EEPROM; BE18000 gets the QCA SFP 0x1e path
+BE10000 gets an `sff,sfp` node on `blsp1_i2c4` as a candidate for module access. Leave TX-disable and polarity unresolved; BE18000 gets the QCA SFP 0x1e path
 (or `managed = "in-band-status"` if the PHY driver is not usable) and
 must not claim `ethtool -m` support. Add `kmod-sfp` to both images, defer
 SFP until the QCA8084/AQR wired ports work, and validate module detect,
@@ -367,7 +363,7 @@ ART is blank; the live caches are zero.
 **Probe QWRT BE10000 firmware.** The standard BE10000 image is
 QWRT 25.12.2 / QSDK 12.5 (kernel 5.4.213), with the 2.4G/5G/5G BDFs and
 the QWRT `read_caldata_to_fs.sh`/`wifi_fw_mount` scripts. The standard
-BE10000 ART caldata at 0x58800/0x8A800/0xBC800 may be valid, unlike the
+BE10000 candidate ART slots at 0x58800/0x8A800/0xBC800 may be valid, unlike the
 modified BE18000 high-band slots; the BE10000 README still warns that
 the modified unit uses coldboot and generated caches.
 
@@ -394,7 +390,7 @@ the live/modified BDFs are the working profile; QSDK13 `ftm.conf` maps
 1/4/2; live caches are zero.
 
 **Probe QWRT BE10000 firmware.** The README/`board.dts` shows the
-standard BE10000 ART caldata at 0x58800/0x8A800/0xBC800 with 0x2d000
+candidate standard BE10000 ART offsets at 0x58800/0x8A800/0xBC800 with 0x2d000
 (184,320 B) slices, BDFs b01/b04/b02, and the QSDK `caldata_2/3/4`
 mapping. The standard BE10000 profile is the origin of the factory ART
 BDFs; the modified BE18000 replaced the 6G RF path.
@@ -595,8 +591,8 @@ explicit.
 QCA SFP PHY at 0x1e, blank high-band ART, coldboot, 2 GiB, fixed MIBIB.
 
 **Probe QWRT BE10000 firmware.** The standard BE10000 is 2.4/5/5 GHz,
-3x QCN62xx, BDFs `_1/4/2`, Netgear/stock AQR image, SFP EEPROM on i2c4,
-ART caldata at 0x58800/0x8A800/0xBC800, QWRT DTB 1 GiB (hardware 2 GiB),
+3x QCN62xx, BDFs `_1/4/2`, Netgear AQR file (stock resident image unknown), SFP EEPROM on i2c4,
+candidate ART slots at 0x58800/0x8A800/0xBC800, QWRT DTB 1 GiB (hardware 2 GiB),
 `qcom,smem-part` NAND.
 
 **Compare with OpenWrt.** The target has the generic driver base and
@@ -610,7 +606,7 @@ still worth factoring into a DTSI.
 | Priority | Gap | Plan |
 |---|---|---|
 | P0 | No Xiaomi device definitions/DTS | Add common DTSI + `be10000`/`be18000` DTS and two `Device/` entries |
-| P0 | FIT rootfs `append-bootargs` missing | Extend `mkits`/`fit-its`, add `root=/dev/ubiblock0_1` |
+| P0 | Root volume selection | Verify the generated volume ID and set the board DT chosen argument |
 | P0 | No Xiaomi board-2 | Two local `ipq-wifi` packages/files with variants |
 | P1 | QCA8084 package/NSSCC not instantiated | Add package/NSSCC nodes; verify 2.5G |
 | P1 | AQR NVMEM not in Xiaomi DTS | Add `0:ETHPHYFW` cell + AQR PHY/port5 |
@@ -624,12 +620,750 @@ still worth factoring into a DTSI.
 | P3 | Validation matrix | Wired, per-band WiFi, SFP, 24h, recovery |
 
 Implementation order: (1) common DTSI and two DTS skeletons; (2) image
-definitions, FIT append-bootargs, local board-2; (3) wired QCA8084/AQR
+definitions, board DT root argument, local board-2; (3) wired QCA8084/AQR
 and `02_network`; (4) BE10000 ART/FIT/board-2 and BE18000 coldboot;
 (5) SFP/board I/O; (6) MLO/6G and 24h validation. No target source file
 was modified by this research; the output is this gap-round document.
 
-## Closing audit
+## BE10000 wired bring-up trace (offline, 2026-11-21)
+
+The extracted [BE10000 DT](../extracted/qwrt-25.12.2-be10000/board.dts)
+gives the Xiaomi port numbers and wrapper settings. The local
+[SSDK enum](../../qsdk/qca/src/qca-ssdk/include/init/ssdk_init.h)
+decodes `switch_mac_mode{,1,2}` as follows. The PCS handles come from
+[OpenWrt RDP433 patch 0349](../../target/linux/qualcommbe/patches-6.18/0349-arm64-dts-qcom-Add-IPQ9574-RDP433-port-node.patch)
+and describe a candidate SoC-side route for Xiaomi.
+
+| Xiaomi PPE port | Vendor wrapper | Xiaomi endpoint | OpenWrt reference route |
+|---|---|---|---|
+| 1–4 | 0x15 UQXGMII | QCA8084 PHYs 1–4 | pcs0_ch0 through pcs0_ch3. RDP433 uses qsgmii and PHYs 0x10–0x13. Xiaomi's four-channel wrapper supports investigating 10g-qxgmii. |
+| 5 | 0x0d USXGMII | Clause 45 PHY 0, vendor WAN | pcs1_ch0. RDP433 uses PHY 8 here. Patch 0350 attaches a firmware NVMEM cell to its AQR PHYs. |
+| 6 | 0x0e 10GBASE-R | SFP, vendor PHY I²C address 0x1e | pcs2_ch0. RDP433 uses USXGMII with a second copper PHY here. |
+
+**Four copper LAN ports.** The Xiaomi MDIO node marks four children for
+address fixup. QSDK's [mdio-qca.c](../../qsdk/qca/src/linux-5.4/drivers/net/phy/mdio-qca.c)
+packs their reg values into the EPHY register and selects available
+addresses for the UNIPHY block. OpenWrt [patch 0306](../../target/linux/qualcommbe/patches-6.18/0306-net-phy-qca808x-Add-QCA8084-probe-function.patch)
+instead joins a PHY package, programs the four PHY and three PCS addresses
+once from its seven-entry property, then enables each PHY clock and
+deasserts reset. Check package discovery on a cold start, NSSCC clocks
+and resets, and PCS channel order before diagnosing LAN configuration.
+
+**Copper WAN.** QSDK's [Aquantia loader](../../qsdk/qca/src/u-boot-2016/drivers/net/ipq_common/ipq_aquantia_phy.c)
+looks up 0:ETHPHYFW. The Netgear file in the extraction establishes file
+availability only. On stock hardware, identify the partition payload
+before specifying the Linux firmware cell and record the running PHY
+version separately.
+
+**SFP.** When built with IN_PHY_I2C_MODE, the [SSDK parser](../../qsdk/qca/src/qca-ssdk/src/init/ssdk_dts.c)
+uses phy_i2c_address for I²C transactions and registers phy_address as a
+synthetic MDIO address. Both fields happen to be 0x1e here. A Linux MDIO
+PHY node at that address would need independent evidence. Verify module
+I²C access, control signals and link independently.
+
+**Network defaults.** The [ipq95xx board script](../../target/linux/qualcommbe/ipq95xx/base-files/etc/board.d/02_network)
+falls through to unsupported hardware for Xiaomi. Once the netdevices
+exist, map the four copper LAN ports and SFP to LAN and port 5 to WAN
+using verified Linux labels. Vendor eth4 identifies the intended WAN
+role only. Verify physical jack order and negotiated speeds individually.
+
+**Calibration cross-check.** The Askey hotplug case reads three MMC slices
+of 0x2d000 bytes and assigns them by PCI domain. A stock BE10000 case
+needs NAND/MTD extraction, validated slot contents and a verified
+domain-to-radio mapping.
+
+### Owner's modified BE10000 (BE18000 firmware profile)
+
+The port target is the owner's hardware-modified BE10000. The installer
+reported RF path and FEM/filter changes using SKY85798. The exact suffix
+and component population remain unknown. The saved custom QWRT runtime
+is the working 6 GHz baseline. Its capture shows a client link on PCI3's
+6 GHz radio at channel 37 and 320 MHz. The installer-supplied BE18000
+QSDK13 image is a separate offline reference. Its SHA-256 was rechecked
+as `88c851b6f8a9103cad3b2540adc9e666f97f5fd6baee61a0c93798e1441a7f24`.
+[Installer account](be18000-sky85798-qsdk13.md) ·
+[Saved link capture](../extracted/live-be18000/probes/round22-mlo-runtime.txt)
+
+**Ethernet cold boot on this unit.** The saved live DT and BE18000 QSDK13
+DT both specify GPIO60, EPHY/UNIPHY registers 0x0c90f018/0x0c90f014,
+`mdio_clk_fixup`, and wrapper modes 0x15/0x0d/0x0e. This supports using
+the QCA8084 trace below for this unit. One difference matters when
+translating reset sequencing: the GPIO flags cell is 0 in the live DT
+and 1 in QSDK13. The local QSDK 5.4 helper gets a numeric GPIO and
+drives low then high explicitly. The flags difference alone cannot
+establish a wiring change or the sequence executed by the 6.6 image.
+[Live DT](../extracted/live-be18000/dt/live-board.dts) ·
+[QSDK13 DT](../extracted/qsdk13-r26.09.05-be18000/be18000-board.dts) ·
+[QSDK 5.4 reset helper](../../qsdk/qca/src/linux-5.4/drivers/net/phy/mdio-qca.c)
+
+**Radio selection and calibration.** The modified mapping is PCI1/1
+(2.4 GHz), PCI2/2 (5 GHz), PCI3/4 (6 GHz). The number after the slash
+is the vendor board-profile selector. All three live board-2 entries
+use QMI chip ID 0 and board ID 255, so the per-radio variant distinguishes
+them. The QSDK13 DT agrees on 1/2/4, but its AL02-C4 FTM rows list
+1/4/2. Using those rows by controller would exchange the two high-band
+profiles. That is an offline mapping conflict; the image's runtime
+selection remains unobserved. A fresh count of the saved modified ART
+found all 184,320 bytes erased in **each** slot at 0x8a800 and 0xbc800.
+Neither slot supplies usable per-unit high-band calibration.
+[Live variants](../extracted/live-be18000/wifi/board-2-live.json) ·
+[QSDK13 FTM rows](../extracted/qsdk13-r26.09.05-be18000/wifi/ftm.conf) ·
+[Controller download trace and ART analysis](be18000-live-probe-4.md)
+
+**Firmware provenance.** Rehashed the extracted live and QSDK13 files.
+All three BDFs and the regulatory database differ. On PCI3 the two
+b0004 files are both 102,400 bytes, with SHA-256 prefixes
+`bd911abb719fbcae` (live) and `eb488f7753d61ba4` (QSDK13).
+The 6,244-byte Skyworks-named gain table is byte-identical. The saved
+live host download trace shows no matching LUT request. For an OpenWrt
+probe, record the selected PCI3 variant and BDF before interpreting
+6 GHz association, bandwidth or MLO results. A successful board-file
+lookup alone leaves per-unit calibration unresolved.
+[QSDK13 variants](../extracted/qsdk13-r26.09.05-be18000/wifi/board-2.json) ·
+[Gain-table and BDF comparison](be18000-sky85798-qsdk13.md)
+
+### PCI3 6 GHz board selection and cold-boot calibration
+
+**Working QWRT.** The saved module parameters include `bdf_pci3=0`.
+In the local CNSS source the QCN9224 case first checks the per-slot module
+parameter, then reads the CNSS node's unprefixed `board_id` when that
+parameter is zero. PCI3 has selector 4. The filename formatter uses two
+bytes (four hex digits), so the effective override explains the observed
+`qcn9224/bdwlan.b0004` even though firmware reports QMI board ID 255.
+The recorded download order is `regdb.bin`, then `bdwlan.b0004`, then
+`caldata_4.bin`. The final 4 has a different origin: PCI calibration
+filenames use the slot index plus one. Equal suffixes on PCI3 are
+coincidental. The local CNSS source explains the capture but is a
+different release from the running module.
+[Live parameters](be10000-porting-probe-3.md) ·
+[Live download sequence](be18000-live-probe-4.md) ·
+[Override selection](../../qsdk/qca/src/qca-cnss/main.c) ·
+[Filename construction](../../qsdk/qca/src/qca-cnss/qmi/qmi.c)
+
+**What supplied calibration on that boot?** A byte comparison confirms
+that live caldata_4.bin equals ART at 0xbc800 for all 184,320 bytes:
+every byte is 0xff. The Wi-Fi startup script passes the board-specific
+cold-boot feature to CNSS. The saved probe reports firmware calibration
+on all three radios. Its timestamped excerpt shows mode 7, completion
+and report handling for the earlier radios; it does not give a PCI3
+duration. The PCI3 DT assigns an 8 MiB CALDB at 0x59100000, and the
+saved PCI3 cache was 5,153,776 zero bytes. The CNSS completion handler
+requests a report upload and marks calibration done. A successful status
+establishes firmware completion; neither the erased input nor the zero
+cache yields reusable coefficients. The saved material does not reveal
+the coefficients retained internally by firmware.
+[Boot capture and memory layout](../extracted/live-be18000/probes/round24-coldboot.txt) ·
+[CNSS completion handler](../../qsdk/qca/src/qca-cnss/main.c)
+
+**Installer QSDK13.** Its PCI3 DT retains board_id 4 and the same CALDB
+range. Its QCN9224 feature INI enables PCI3 cold boot for ap-al02-c4.
+Direct comparison of the extracted files gives the following result:
+
+| File | Saved live QWRT | Installer QSDK13 |
+|---|---|---|
+| bdwlan.b0004 | Modified-unit 6 GHz board data, SHA-256 prefix bd911abb719fbcae | Different board data, prefix eb488f7753d61ba4 |
+| caldata_4.bin | 184,320 erased bytes | 100,352 bytes identical to QSDK13 bdwlan.b0002 |
+| caldata_3.bin in QSDK13 | — | 102,400 bytes identical to QSDK13 bdwlan.b0004 |
+
+The QSDK13 mount script creates the QCN9224 ath12k calibration links
+only inside its board-2.bin branch. On ap-al02-c4 it uses the FTM rows
+for controllers 1–3. Thus the package contains a consistent explanation
+for a *potential* 5/6 GHz caldata swap, alongside a correct PCI3 DT
+board selector. No installer-image boot log here establishes which
+calibration bytes its firmware actually consumed.
+[Installer DT](../extracted/qsdk13-r26.09.05-be18000/be18000-board.dts) ·
+[Feature INI](../extracted/qsdk13-r26.09.05-be18000/rootfs/lib/firmware/qcn9224/firmware_rdp_feature.ini) ·
+[Mount script](../extracted/qsdk13-r26.09.05-be18000/rootfs/etc/init.d/wifi_fw_mount)
+
+**OpenWrt ath12k.** During target-capability handling, patch 700 reads
+`qcom,calibration-variant` from the radio's device node into
+`bdf_ext`. The saved board-2 container has the PCI3 key
+`bus=pci,qmi-chip-id=0,qmi-board-id=255,variant=Xiaomi_BE18000_live_4`
+with a 102,400-byte payload. This supplies an exact board lookup target.
+It does not select the separate calibration file: the backports 7.2
+trace shows an EEPROM capability branch and a file path that tries
+`cal-<bus>-<id>.bin` followed by `caldata.bin`. The same source shows
+two CALDB paths: one allocates a chunk, while the target-memory
+assignment path records address zero. Neither excerpt demonstrates a
+mode-7 request, a PCI3 completion indication or a return to normal
+operation on this hardware. Assigning a reserved address alone is
+therefore an untested proposal. For a future boot trace, record the
+actual PCI endpoint, selected variant/payload, calibration file request,
+CALDB response address and size, firmware mode transition and completion
+before interpreting a 6 GHz link as evidence of cold calibration.
+[Variant patch](../../package/kernel/mac80211/patches/ath12k/700-ath12k-read-calibration-variant-from-dt.patch) ·
+[Decoded board container](../extracted/live-be18000/probes/round19-board2.txt) ·
+[Backports 7.2 source excerpts](../extracted/live-be18000/probes/round20-calibration-source.txt)
+
+#### PCI3 mode 7, CALDB handoff and return to service
+
+**QSDK startup.** In the local CNSS implementation the host makes the mode
+decision. In probe order, an enumerated PCI target with cold_boot_support
+set and cal_done clear gets cal_in_progress set. CNSS registers its
+subsystem and waits for firmware readiness. With the observed driver_mode
+of 0, the calibration pass calls __cnss_wlan_enable with CNSS_CALIBRATION
+(7). FTM takes a different branch (10). Calibration skips ordinary WLAN
+configuration, sets CNSS_COLD_BOOT_CAL, sends the WLAN mode request and
+schedules per-device calibration work. The supplied QSDK13 feature INI
+enables the PCI3 support flag. Its presence establishes configuration,
+while the call sequence here is from the local comparison source.
+[Probe and mode sender](../../qsdk/qca/src/qca-cnss/main.c) ·
+[Mode enum](../../qsdk/qca/src/qca-cnss/include/cnss2.h) ·
+[Installer feature flags](../extracted/qsdk13-r26.09.05-be18000/rootfs/lib/firmware/qcn9224/firmware_rdp_feature.ini)
+
+**CALDB is negotiated during firmware memory setup.** Firmware requests a
+typed segment and length. On the IPQ reserved-memory path, CNSS PCI handles
+QMI_WLFW_MEM_CAL_V01 when cold boot is enabled, checks the requested length
+against caldb-size, assigns caldb-addr as the physical address and maps
+the requested extent for the host. PCI3's DT supplies 0x59100000 and an
+8 MiB ceiling. The request-memory event calls the bus allocator then
+cnss_wlfw_respond_mem_send_sync. The response to firmware carries the
+address, **requested length** and type for each segment (QMI message
+0x0036). This is separate from the later mode-7 command and from the
+optional calibration-report upload size. The 5,153,776-byte cache cannot
+establish the length that PCI3 requested on the wire.
+[PCI memory assignment](../../qsdk/qca/src/qca-cnss/pci/pci.c) ·
+[Event dispatch](../../qsdk/qca/src/qca-cnss/main.c) ·
+[QMI memory response](../../qsdk/qca/src/qca-cnss/qmi/qmi.c)
+
+**Completion and return.** The CAL_DONE indication can carry an upload
+size. The callback posts a completion event. On success the handler
+requests report upload, sets cal_done, signals completion and clears the
+cold-calibration bit. The per-device worker waits for that bit to clear,
+then sends OFF (4). With soft_switch enabled it clears cal_in_progress
+and directly calls the WLAN driver's probe. The default-zero branch puts
+the subsystem, clears cal_in_progress, waits for the preceding target
+where applicable, and gets the subsystem again. The worker marks the
+device initialized and decrements the outstanding count. The completion
+callback itself does not issue a mission-mode command. The saved round
+24 transcript prints mode 7 and OFF for PCI1 and calibration completion
+for PCI2. It summarizes the PCI3 calibration; the later client capture
+establishes PCI3 service. Neither capture identifies the worker branch,
+the PCI3 OFF transaction, or a timestamped PCI3 mission-mode request.
+[Completion callback](../../qsdk/qca/src/qca-cnss/qmi/qmi.c) ·
+[cnss_driver_cal_work](../../qsdk/qca/src/qca-cnss/main.c) ·
+[Saved boot excerpt](../extracted/live-be18000/probes/round24-coldboot.txt) ·
+[Subsequent client link](../extracted/live-be18000/probes/round22-mlo-runtime.txt)
+
+**OpenWrt PCI path.** Checked the backports-7.2 release archive against
+the fork's package SHA-256 (6ec76a4c…3badb9454). In qmi.c the request
+callback selects assign_target_mem_chunk only with
+ATH12K_FLAG_FIXED_MEM_REGION. The base source sets this flag in ahb.c;
+pci.c initializes fw_mode to NORMAL. The ordinary PCI allocation branch
+can allocate coherent DMA memory for CALDB type 4, or reuse a chunk with
+matching size and type. Its populated memory response carries the DMA
+address, length and type. The fixed branch's zero CALDB address is a
+different path. Whether the candidate PCI firmware requests type 4 and
+accepts that response on this unit remains unobserved.
+
+In core.c, firmware startup passes ab->fw_mode to the QMI start routine,
+which sends INI, WLAN configuration, then that mode. qmi.c advertises a
+cal_done indication interest and reports a cal_done capability field.
+Those fields alone do not drive a calibration session. No corresponding
+PCI startup sequence selecting 7, handling completion and re-entering
+ordinary service was found in this release and the fork's ath12k patches.
+For a future capture, correlate the per-PCI3 memory request/response,
+FW_READY, WLAN mode, CAL_DONE, OFF and subsequent probe/service. A missing
+CALDB request cannot be corrected by changing a response address alone.
+[OpenWrt package pin](../../package/kernel/mac80211/Makefile) ·
+[Backports 7.2 source archive](https://github.com/openwrt/backports/releases/download/backports-v7.2/backports-7.2.tar.zst) ·
+[Fork patches](../../package/kernel/mac80211/patches/ath12k/)
+
+#### Installer module evidence for soft_switch and mission mode
+
+The following offsets are relative to the ELF sections in the installer
+image's 6.6.47 AArch64 modules. Calls were resolved using ELF relocations.
+Module SHA-256 prefixes are 68efb39f1644665b (ipq_cnss2.ko) and 6daf5fe1b1fde751
+(qca_ol.ko).
+
+**Which setting ships?** ipq_cnss2.ko declares soft_switch as an unsigned
+module parameter. Its __param entry at 0x28 references param_ops_uint and
+points to .bss+0x94, giving it an initial value of zero. The loader
+collects cnss2-prefixed arguments from /proc/cmdline. The packaged DT
+appends cnss2.enable_mlo_support=1 and supplies no soft_switch value.
+No explicit override surfaced in the readable etc, lib/wifi or ini
+configuration examined. Zero is consequently the image-backed expectation.
+Bootloader arguments or runtime configuration can still change it.
+[Installer loader](../extracted/qsdk13-r26.09.05-be18000/rootfs/etc/init.d/load_cnss2) ·
+[Installer DT](../extracted/qsdk13-r26.09.05-be18000/be18000-board.dts)
+
+**What follows calibration in the shipped binary?** In ipq_cnss2.ko
+the worker calls cnss_wait_for_cold_boot_cal_done at .text+0x6364 and
+passes 4 to cnss_wlfw_wlan_mode_send_sync at 0x6370. Only the successful
+OFF path reads .bss+0x94 at 0x63a0. A nonzero value clears the in-progress
+byte and calls the driver callback indirectly at 0x63bc. Zero branches
+to 0x63e4: depending on another per-device field, the code calls either
+__cnss_hif_put/get or __cnss_subsystem_put/get. Between put and get it
+clears the in-progress byte and, when applicable, waits for the previous
+target's initialized status. Both successful paths converge on setting
+initialized and decrementing the outstanding counter. The binary therefore
+narrows the earlier description: soft_switch=0 selects a release/reacquire
+path, but by itself does not identify the reset mechanism used by PCI3.
+[CNSS module](../extracted/qsdk13-r26.09.05-be18000/rootfs/lib/modules/6.6.47/ipq_cnss2.ko)
+
+**Where mission mode can be sent.** qca_ol.ko has a normal driver-enable
+path from hif_wlan_enable (call at 0xd8dec) through pld_wlan_enable
+(PCI dispatch at 0x7ad34) and pld_pcie_wlan_enable to cnss_wlan_enable
+(0x7c06c). The PCI wrapper maps input mode zero to CNSS mode zero
+at 0x7c040–0x7c060. In ipq_cnss2.ko the internal enable routine calls
+the QMI WLAN mode sender at 0x2f34. This gives a concrete mission-mode
+path on driver bring-up, separate from the worker's OFF call. A static
+call path does not identify a particular execution. The saved record
+does not show this installer image sending mode zero on PCI3.
+[WLAN module](../extracted/qsdk13-r26.09.05-be18000/rootfs/lib/modules/6.6.47/qca_ol.ko) ·
+[CNSS mode enum in comparison source](../../qsdk/qca/src/qca-cnss/include/cnss2.h)
+
+**Mapping to OpenWrt backports 7.2.** These are implementation requirements
+inferred from the vendor sequence. Firmware support on the modified radio
+still requires a cold-power-on trace.
+
+| Phase | Existing ath12k entry point | What the PCI3 port would need |
+|---|---|---|
+| First firmware boot | qmi.c handles REQUEST_MEM, FW_MEM_READY and FW_READY separately. PCI can return a DMA segment for CALDB type 4. | Track a per-radio calibration phase. Verify the PCI3 BDF and the accepted CALDB address and length before selecting mode 7. |
+| Calibration start | FW_READY normally calls ath12k_core_qmi_firmware_ready, which starts firmware using ab->fw_mode. | At first readiness, issue the firmware-supported calibration request and defer ordinary datapath and MAC registration. Keep ordinary and factory-test boots distinct. |
+| Completion and OFF | The QMI layer advertises calibration-done interest. ath12k_qmi_firmware_stop issues OFF and returns void. | Handle the completion indication on the correct radio, bound the wait, and observe OFF success before advancing. On timeout or transport loss, clear pending work without declaring the radio ready. |
+| Second bring-up | The normal firmware-ready path already starts the radio. MAC registration is coordinated for the hardware group. | Use a firmware-supported restart or in-place transition, retain the required CALDB state, and track completion across the second readiness event. Enter NORMAL once and join group bring-up after successful mission startup. Which transition preserves this firmware's calibration is still open. |
+
+The decision point for a hardware capture is immediately after PCI3's
+CAL_DONE: capture OFF acknowledgement, HIF/subsystem teardown or direct
+probe, any second memory/ready handshake, and the mode-zero request and
+response on that same service instance.
+[Package pin](../../package/kernel/mac80211/Makefile) ·
+[Verified release source](https://github.com/openwrt/backports/releases/download/backports-v7.2/backports-7.2.tar.zst)
+
+#### PCI3 bus selector and CALDB lifetime across OFF
+
+**The selector is the CNSS bus type.** In the installer ipq_cnss2.ko
+platform initialization compares the device ID with 0x1109 (QCN9224)
+at .text+0x80d8 and takes the branch at 0x80e0. That path stores zero at
+platform-context offset 0x70 (0x8200). The subsequent dispatch selects
+cnss_pci_get_ops at 0x82e0 for zero. Independently, cnss_get_bus_type
+at 0x16d64 returns zero for 0x1109. The comparison source names this
+field bus_type and assigns CNSS_BUS_PCI in the QCN9224 case. The installer
+DT identifies PCI3 as qcom,cnss-qcn9224. Thus the default-zero soft_switch
+path for this radio selects **HIF put/get**. This is a device-specific
+prediction from the shipped code; the installer image has no saved PCI3
+execution trace here.
+[Installer module](../extracted/qsdk13-r26.09.05-be18000/rootfs/lib/modules/6.6.47/ipq_cnss2.ko) ·
+[Installer PCI3 DT](../extracted/qsdk13-r26.09.05-be18000/be18000-board.dts) ·
+[Comparison source](../../qsdk/qca/src/qca-cnss/main.c)
+
+| Return path after successful OFF | What the shipped code establishes | CALDB consequence |
+|---|---|---|
+| soft_switch=0, PCI3 | Worker reads +0x70 at 0x63e4 and 0x6460, calls __cnss_hif_put at 0x63f0 and __cnss_hif_get at 0x646c. For device 0x1109, shutdown dispatches through 0x12d1c to the helper at 0x12944. On ordinary shutdown that helper calls cnss_power_off_device at 0x12afc and cnss_pci_remove at 0x12b6c. | Device power and host reserved DDR have separate lifetimes. On a subsequent reserved CALDB request the same DT base is available. No pre/post bytes or mission-pass read were captured. |
+| soft_switch nonzero | The direct callback at 0x63bc bypasses the worker's put/get pair. Firmware has already acknowledged OFF. | The worker itself issues no unmap or erase on this branch. The effect of OFF, firmware and the next probe on the contents remains unknown. |
+| soft_switch=0, non-PCI subsystem branch | The worker's alternate callees reach rproc_shutdown at 0x62a4 and rproc_boot at 0x61a0. The QCN9224 initialization above excludes this branch for PCI3. | This branch supplies no evidence about retention in PCI3's window. Retention for an AHB target would require that target's memory layout and loader behavior. |
+
+**Physical reservation, host mapping and usable calibration are three
+different observations.** In the shipped allocator the caldb-size and
+caldb-addr property references lead to the physical-address store at
+0xd1e0, ioremap_prot at 0xd1fc and the virtual-address store at 0xd200.
+For this radio the base is 0x59100000 and the maximum length is 8 MiB.
+The reserved-memory cleanup code has an iounmap at 0xe50c followed by
+clearing descriptor fields. In the comparison PCI source, reserved CAL
+takes the ordinary unmap branch; explicit memory clearing belongs to
+AFC. Unmapping releases CPU access to the range. It does not zero the
+backing DDR. The installer call chain below establishes when normal HIF shutdown reaches
+this cleanup; the saved captures do not show a live unmap.
+[PCI allocator and cleanup](../../qsdk/qca/src/qca-cnss/pci/pci.c)
+
+**File restoration is unverified for the installer.** The comparison
+source compiles the CALDB report upload helper and firmware-memory-ready
+download helper as empty functions on kernel 6.1 and later. The
+zero-filled cache captured from the working 5.4 image cannot demonstrate
+that the installer 6.6 module restores coefficients from disk. The
+offline evidence establishes a reusable physical address, not byte or
+firmware-state continuity across either applicable PCI3 return path.
+[Version-dependent upload](../../qsdk/qca/src/qca-cnss/main.c) ·
+[Version-dependent download](../../qsdk/qca/src/qca-cnss/qmi/qmi.c)
+
+For ath12k, retain the per-radio CALDB allocation through the intended
+transition and observe the address and requested length on both boots
+if firmware renegotiates memory. To distinguish retention from firmware
+reinitialization, compare a digest over the same requested extent after
+CAL_DONE and before mission firmware can write it, with CPU/device
+access synchronized. Record firmware's subsequent use or reported
+calibration status separately. Equal addresses alone cannot answer
+either question.
+
+#### PCI3 HIF shutdown, CALDB unmap and the next memory request
+
+**Shutdown reaches PCI removal.** In the installer ipq_cnss2.ko,
+cnss_pci_dev_shutdown subtracts 0x1101 from the device ID and tests
+mask 0x10d. QCN9224 (0x1109) selects bit 8 and calls the helper at
+.text+0x12944 via 0x12d1c. The earlier power-off site at 0x12cd4
+belongs to the 0x3e device branch. On the ordinary 0x1109 route, the
+helper calls cnss_power_off_device at 0x12afc and cnss_pci_remove at
+0x12b6c. Pending dump collection can exit this helper early. This
+distinction matters: the WLAN driver's remove callback alone would
+not establish that CNSS releases its firmware memory.
+[Installer module](../extracted/qsdk13-r26.09.05-be18000/rootfs/lib/modules/6.6.47/ipq_cnss2.ko) ·
+[Comparison PCI shutdown and remove](../../qsdk/qca/src/qca-cnss/pci/pci.c)
+
+**What gets unmapped.** cnss_pci_remove tests bit 0 at platform offset
+0xf8c (0x12840–0x12848). The comparison source calls this
+dma_alloc_supported. When clear, it calls cnss_bus_free_fw_mem at
+0x1284c. In reserved-memory cleanup, a descriptor with no VA is skipped
+at 0xe484. For a mapped CALDB segment (type 4), the type checks at
+0xe4a8 and 0xe500 route it to iounmap at 0xe50c, then clear the VA
+and size. Type 10 takes the explicit AFC clear and type 8 skips the
+unmap. Thus **ordinary HIF put releases the active CPU mapping when
+PCI3 is using the reserved CALDB path**. A DMA-backed target skips that
+cleanup at removal. The installer DT provides the reserved window and
+the compiled allocator can use it; the capture does not expose the
+runtime flag or a type-4 mapping for this installer boot. Clearing
+descriptor fields does not establish erasure of the physical bytes.
+[PCI allocator and cleanup](../../qsdk/qca/src/qca-cnss/pci/pci.c) ·
+[Installer DT](../extracted/qsdk13-r26.09.05-be18000/be18000-board.dts)
+
+**HIF get and mission memory setup.** After OFF and put, the calibration
+worker clears cal_in_progress before HIF get. The HIF power-up path
+calls cnss_pci_probe and cnss_bus_dev_powerup (0xde4 and 0xe24).
+A fresh CALDB assignment depends on what that firmware boot requests.
+WLFW REQUEST_MEM (0x35) supplies segment types and lengths. The host
+request event calls cnss_bus_alloc_fw_mem at 0x5738 and, on success,
+cnss_wlfw_respond_mem_send_sync at 0x5748. On the reserved CAL branch
+the allocator reads caldb-size and caldb-addr, maps the requested extent
+at 0xd1fc and stores the new VA at 0xd200. With cold_boot_support still
+enabled, a second type-4 request fitting PCI3's 8 MiB window would
+therefore receive **the same physical base, 0x59100000**. The requested
+length could differ. Firmware asks for a type and size; the host chooses
+the physical address. HIF get alone does not trigger a CALDB request.
+[CNSS memory indication](../../qsdk/qca/src/qca-cnss/qmi/qmi.c) ·
+[Memory event dispatch](../../qsdk/qca/src/qca-cnss/main.c)
+
+**Offline limit.** The saved working-QWRT excerpt supplies the PCI3 DT
+address, but contains no pair of decoded PCI3 type-4 requests and
+responses spanning calibration and mission startup. The separate
+installer image supplies executable paths only. To resolve reuse, match
+PCI3's service instance across OFF, HIF put/get and the next FW_READY;
+inspect the second 0x35 segment list and its 0x36 response. A type-4
+entry with base 0x59100000 establishes address reuse. Content retention
+and firmware consumption require independent evidence.
+[Saved cold-boot excerpt](../extracted/live-be18000/probes/round24-coldboot.txt)
+
+#### Live PCI3 QMI history after SSH access returned
+
+The running router reports xiaomi,be18000, kernel 5.4.250 and
+/sys/module/ipq_cnss2/parameters/soft_switch = 0. Reading the CNSS
+debugfs qmi_record entry printed its retained history to dmesg. The
+following entries are for service 0x3a (QCN9224_3), ordered by embedded
+tstamp because the ring wrapped. These are readings from the working
+QWRT system. The installer 6.6.47 image remains a separate baseline.
+
+| Embedded tstamp | Recorded PCI3 events |
+|---|---|
+| 49681–49827 | FW_MEM_REQ_IND (0x35), MEM_INFO request/response (0x36), FW_MEM_RDY_IND (0x37) |
+| 49994–51325 | WLAN mode request/response, then CAL_DONE_IND (0x3e) at 51325 |
+| 51569–51570 | Another WLAN mode request/response immediately following calibration completion |
+| 56511–56555 | Fresh indication registration, host capability exchange, FW_MEM_REQ_IND at 56551, successful MEM_INFO exchange and FW_MEM_RDY_IND at 56555 |
+| 56751–58055 | WLAN configuration request/response followed by WLAN mode request/response |
+
+**Confirmed live:** PCI3 negotiated firmware memory again after completing
+calibration. Its current CNSS state is 0x20107 (QMI connected, firmware
+memory ready, firmware ready, driver probed, QDSS started). The live PCI3
+DT contains 0x59100000 and 0x00800000 for CALDB base and maximum length.
+At inspection ath2 was operating as a 6 GHz AP on channel 93 at 320 MHz.
+
+**Still unresolved:** this history records message IDs and result codes,
+without the segment list or mode argument. The sequence is consistent
+with calibration, OFF and normal startup. It cannot identify a type-4
+segment in the second request, its returned address, or the contents of
+the CALDB. No reboot, radio restart or configuration change was used.
+
+#### Live verification of the PCI3 return path and CALDB mapping
+
+**The two kernel builds take different return paths.** Read the running
+router's /lib/modules/5.4.250/ipq_cnss2.ko over SSH and matched its GNU
+build-ID note byte-for-byte to /sys/module/ipq_cnss2/notes/.note.gnu.build-id.
+Module SHA-256: f01268d60a0705a95e955518385c086dd3b739dee69845bcd80c266d6c8a4920.
+In this build the calibration worker waits at .text+0x8cb8 and calls the
+WLAN mode sender with OFF (4) at 0x8cc4. After a successful return it
+tests .bss+0xf8, the ELF parameter backing soft_switch. Zero branches to
+__cnss_subsystem_put at 0x8d44 and __cnss_subsystem_get at 0x8de4.
+Those routines contain rproc_shutdown (0x8bfc) and rproc_boot (0x8974).
+The current live parameter is zero. This identifies the compiled path
+selected by that setting; the parameter reading alone cannot establish
+that nobody changed it since boot. The QSDK13 PCI HIF conclusion above
+applies to the installer 6.6.47 module.
+
+**PCI3 CALDB has an active CPU mapping during normal Wi-Fi service.**
+/proc/vmallocinfo showed phys=0x59100000, ioremap, allocation span
+8,048,640 bytes, caller cnss_pci_alloc_fw_mem+0x394/0xc60. In the
+build-ID-matched module this is exactly the return site of __ioremap
+(+0x390) after the caldb-addr property lookup (+0x378). The live PCI3 DT
+specifies an 8 MiB maximum. PCI1 and PCI2 had mappings from the same
+call site at 0x52d00000 and 0x55f00000. The vmalloc span includes kernel
+mapping accounting and cannot substitute for the exact WLFW segment
+length. This snapshot establishes a CALDB mapping while PCI3 is in
+service. It cannot date the allocation to a particular handshake,
+demonstrate an earlier unmap or recover the wire payload.
+
+**Radio and file identity.** The AP ath2 reported parent wifi2. Its PCI
+endpoint was 0004:01:00.0, vendor/device 17cb:1109, bound to cnss_pci.
+This is the live Linux domain for the logical PCI3 radio. Its CNSS DT
+board_id was 4 and bdf_pci3 was zero. The resolved board file SHA-256
+started bd911abb719fbcae, matching the saved live profile. A full hash
+of caldata_4.bin matched 184,320 bytes of 0xff; the PCI3 cache hash
+matched 5,153,776 bytes of zero. Neither file reveals the live CALDB
+contents. The read-only inspection also found QCA808X PHY ID 0x004dd180
+at MDIO addresses 1–4, AQR113C bound at 0 and QCA SFP at 0x1e. Those
+are current bindings; their cold-start order remains source-derived.
+
+#### Live 5.4.250 subsystem teardown and CALDB retention
+
+**Shutdown call chain.** The live module passes the operations table at
+.rodata+0xee8 to rproc_alloc. Its stop callback at .text+0x20b8 calls
+cnss_bus_dev_shutdown at 0x2100. The PCI dispatch at 0x20c2c reaches
+cnss_pci_dev_shutdown; device 0x1109 selects the helper at 0x15628.
+On the ordinary teardown path that helper calls cnss_pci_remove at
+0x15820. Removal tests the DMA-allocation flag at platform offset
+0x1764. For the reserved-memory case it calls cnss_bus_free_fw_mem
+at 0x155f8, which calls cnss_pci_free_fw_mem at 0x20664. Its mapped
+type-4 descriptor takes iounmap at 0x13830 and clears the saved VA and
+size. These offsets are for the build-ID-matched live module identified
+above. The installer module has a different layout.
+
+**Recreation on the next request.** After subsystem put, the worker
+clears cal_in_progress at 0x8d50 before subsystem get at 0x8de4. The
+retained PCI3 QMI history shows another memory negotiation. The
+request event calls the bus allocator at 0x3dec and sends the memory
+response at 0x3dfc on success. For reserved CALDB, the allocator reads
+caldb-addr and calls __ioremap again. A fresh SSH check found PCI3
+remoteproc running, FW_READY and DRIVER_PROBED set, and the CALDB
+ioremap still present at 0x59100000 (span 8,048,640 bytes, caller
+cnss_pci_alloc_fw_mem+0x394). Taken together, the normal code path and
+the before/after protocol events support an unmap followed by a new
+mapping at the same physical base. Only the final mapping was observed
+directly. The retained events omit individual segment descriptors and
+the kernel log yielded no timestamped PCI3 unmap or remap.
+
+**Evidence about bytes.** The CALDB cleanup clears host bookkeeping.
+The explicit payload-clear branch is for type 10 (AFC); type 4 bypasses
+it. Mapping the same reserved DDR again permits its contents to survive.
+The live module also gates the file-to-memory call at 0x19d28 on both
+cold-boot support and the in-progress flag (0x19d08–0x19d1c). Since
+the worker clears that flag before the second boot, this handler does
+not normally restore the zero-filled PCI3 cache on the mission pass.
+These findings support a possible RAM handoff. They cannot establish
+that firmware preserved, read or applied the same calibrated bytes.
+A current memory digest alone would have no calibration-time baseline
+to compare against. The radio and its mappings were left running.
+
+#### Does PCI3 mission firmware report consuming CALDB?
+
+**Firmware-side evidence.** A read-only SSH copy of the running image's
+qcn9224/amss.bin was 7,319,552 bytes, SHA-256
+b03dbb1a46639aebb42ff03ee9b7dacb9c7735957ad728ace680f34c8278497b.
+Its printable diagnostics include an assertion comparing
+remote_ddr_mem_req->mem_seg[caldb_idx].size with platform_get_cal_db_size().
+It also contains rxdcoHandleSaveRxdcoLutToCalDB, the literally named
+rxdcoHandleRestroreRxdcoLutFromCalDB, and an RXDCO beamforming restore
+message with bandwidth, chain and home-channel fields. This gives two
+firmware-side clues: a defined size for an external CALDB segment, and
+PHY code that can restore calibration tables. Strings alone cannot tie
+that particular restore routine to the external segment, this PCI3 boot,
+or the coefficients produced during the preceding mode-7 pass.
+
+**What mission startup reported.** In PCI3's retained second handshake
+(instance 0x3a), firmware acknowledged MEM_INFO and emitted FW_MEM_RDY
+at tstamp 56555. FW_INIT_DONE followed at 56700. WLAN_CFG and WLFW_MODE
+then completed. The earlier pass contains CAL_RPRT and CAL_DONE; the
+retained second pass has no indication identifying a restored table,
+its address, checksum, band or chain. The QDSS memory-ready indication
+in the second pass belongs to tracing. The current CNSS stats still show
+FW_READY and DRIVER_PROBED and the host still maps 0x59100000. Searches
+of the available dmesg and logread buffers found none of the identified
+restore diagnostics. Boot logs are bounded and firmware debug messages
+need not reach these buffers. **Mission startup succeeded; actual reuse
+of the mode-7 bytes remains unobserved.**
+
+**OpenWrt consequence.** Treat the host's report of prior calibration as
+part of the handoff. The comparison CNSS host-capability request sets
+cal_done_valid and copies plat_priv->cal_done; its success handler sets
+that state after firmware CAL_DONE. Both PCI3 passes include HOST_CAP in
+the live ring, but the ring omits the field values. In the hash-verified
+OpenWrt backports 7.2 ath12k source, qmi.c:2222 already serializes
+ab->qmi.cal_done. A source search found the read and no assignment to
+that field in the base driver or fork's ath12k patches. A port would
+need to set it on genuine per-radio completion, carry that state and
+the corresponding allocation through the deliberate restart, and
+invalidate them together if the allocation or firmware session can no
+longer reuse the data. Verify the candidate firmware's requested CALDB
+length and mission-pass host-capability value. Those are host-side
+checks; a firmware restore event or equivalent firmware telemetry
+identifying the retained data would test consumption. The vendor AMSS
+diagnostics describe this firmware build, not a guaranteed interface
+of the candidate ath12k firmware.
+[CNSS QMI fields](../../qsdk/qca/src/qca-cnss/qmi/qmi.c) ·
+[OpenWrt package pin](../../package/kernel/mac80211/Makefile) ·
+[Backports source](https://github.com/openwrt/backports/releases/download/backports-v7.2/backports-7.2.tar.zst)
+
+#### PCI3 cal_done from completion to mission HOST_CAP
+
+**Live 5.4.250 writer.** The running CNSS module's GNU build ID is
+e0b148966c2b1922cc5033ea3f0ce6e7345ffed0. In its successful
+cold-calibration event path, the store at .text+0x4448 writes byte 1
+at platform-context offset 0x1388. The event worker uses a biased
+pointer: x22 is the platform base, x26 is x22 minus 0x120, and the
+store uses x26 + 0x1120 + 0x388. It then signals completion at 0x4250
+and clears the cold-calibration-in-progress state bit. This ordering
+makes the result available before the waiting worker continues. The
+worker's separate byte clear at 0x8d50 is cal_in_progress, not cal_done.
+[Earlier live worker trace](#live-54250-subsystem-teardown-and-caldb-retention)
+
+**Live serializer.** In the HOST_CAP builder, x20 is the platform context
+and x26 is x20 + 0x1000. The load at 0x18258 reads byte +0x388 from x26:
+the same platform offset 0x1388. Instructions 0x18260–0x18274 write 1
+to request offset 0xa6 and the loaded value to 0xa7. The module's own
+wlfw_host_cap_req_msg_v01_ei table maps those offsets to the optional
+presence flag and one-byte value of TLV 0x1a. Its QMI send sites use
+HOST_CAP message ID 0x34. This verifies the sender and field encoding
+against the live binary independently of the comparison source.
+
+**What was sent on this boot?** PCI3 service 0x3a recorded the initial
+HOST_CAP at 49666, CAL_DONE_IND at 51325, and the next HOST_CAP at
+56543 with a successful response at 56544. The code and those events
+support a mission-pass cal_done value of 1 on the normal success path.
+The retained history omits TLV bytes. No independent payload capture
+or flag-value log was found, and a successful HOST_CAP response does
+not acknowledge a particular TLV or prove use of CALDB coefficients.
+
+**Where to change ath12k.** In the pinned backports 7.2 qmi.c, the
+existing HOST_CAP builder already sets cal_done_valid and reads
+ab->qmi.cal_done (lines 2221–2222). Indication registration sets
+cal_done_enable (2365–2366). The missing work is ownership of the value
+and its associated per-radio CALDB. The following are proposed port
+semantics, not behavior observed in ath12k:
+
+| Transition | Placement and value |
+|---|---|
+| New radio or new calibration attempt | Keep the per-ab value zero before the first HOST_CAP. Invalidate any older result when beginning a replacement attempt. |
+| Successful firmware completion | Decode CAL_DONE on the same QMI instance and process it on the serialized event path. Require an active calibration attempt with its retained CALDB. Set cal_done to 1 before waking the worker that sends OFF. Ignore stale or duplicate indications. |
+| Deliberate OFF and second service arrival | Preserve the bit and matching memory through this transition. The next HOST_CAP then advertises 1 before the new memory negotiation. Do not clear it solely because a service-exit event arrived. If mission firmware subsequently asks for incompatible backing, abort this handoff rather than completing startup with a stale claim. |
+| Timeout, failed or abandoned handoff, or loss of backing | Clear the bit before another HOST_CAP can be sent. Cover the CALDB replacement path in ath12k_qmi_alloc_chunk (2584 onward), bulk release in ath12k_qmi_free_target_mem_chunk (2551 onward), and final QMI teardown (4076 onward). On recovery, reuse needs explicit evidence that the backing and result remain valid. |
+
+For validation, check PCI3's outgoing TLV 0x1a on both HOST_CAP requests:
+expect 0 before calibration and 1 after completion with retained backing.
+Exercise a timeout or invalidated allocation separately and expect the
+next advertisement to be 0. Keep the firmware-use test separate.
+[OpenWrt package pin](../../package/kernel/mac80211/Makefile) ·
+[Backports 7.2 source](https://github.com/openwrt/backports/releases/download/backports-v7.2/backports-7.2.tar.zst)
+
+#### Can the existing live traces recover the two cal_done TLVs?
+
+**CNSS history.** On live 5.4.250, PCI3 instance 0x3a has HOST_CAP
+request/response pairs at embedded timestamps 49666/49667 and
+56543/56544, with CAL_DONE_IND at 51325. The loaded module's qmi_log
+symbol occupies 3,072 bytes. Its qmi_record writer (.text+0x17bf0)
+wraps the index with 0x7f: 128 records of 24 bytes. It records message
+identity, instance, result/error information and a timestamp. It receives
+no encoded QMI payload. The table therefore cannot recover the value of
+TLV 0x1a for either request, even while both records remain in the ring.
+The expected initial 0 and mission 1 come from the driver trace above.
+[Comparison history definition](../../qsdk/qca/src/qca-cnss/qmi/qmi.h) ·
+[History writer and printer](../../qsdk/qca/src/qca-cnss/qmi/qmi.c)
+
+**Other existing traces.** The running kernel has FTRACE disabled and
+neither tracefs location exists. PCI3's remoteproc debugfs directory
+exposes no trace file. CoreSight exists, but ETF and ETR both reported
+curr_sink=0 at inspection (ETR out_mode=mem). DIAG DCI reported zero
+clients and USB disconnected. The live system does retain QDSS control
+messages: on the mission pass the QDSS memory request at 58076 and ready
+indication at 58077 follow HOST_CAP at 56543. They establish QDSS setup,
+without exposing earlier QMI bytes. A read-only filename search under
+/tmp, /data, /overlay/upper and /mnt found no matching packet, QDSS or
+firmware-log capture. Current sink and client status cannot reconstruct
+historical capture settings. No trace session was started or drained.
+
+**Firmware-use result.** The retained mission messages acknowledge
+HOST_CAP and the memory exchange, then report firmware initialization
+and WLAN startup. The accessible logs contained no decoded cal_done
+value or firmware event identifying consumption of PCI3's retained
+calibration. A future payload capture could test the host's 0/1 values;
+even a confirmed 1 would still require a separate firmware restore
+indication to establish that the retained coefficients were applied.
+
+### QCA8084 cold boot and first PHY discovery
+
+**QSDK.** The four BE10000 DT children carry `fixup` and `reg` values
+1–4. Their node names end in 0–3. The MDIO driver reads `reg` when
+constructing the address map. The fifth child is the Clause 45 AQR at 0.
+[Extracted BE10000 DT](../extracted/qwrt-25.12.2-be10000/board.dts)
+
+1. QSDK U-Boot has an earlier, conditional Ethernet path. With QCA8084
+   support and the matching board PHY type, IPQ9574 EDMA runs
+   `ipq_phy_addr_fixup()` and `ipq_clock_init()` before reading the two
+   PHY ID registers. Whether Xiaomi's installed loader executed Ethernet
+   initialization on a given boot remains unknown.
+   [IPQ9574 EDMA](../../qsdk/qca/src/u-boot-2016/drivers/net/ipq9574/ipq9574_edma.c)
+2. QSDK Linux performs its own initialization. `qca_mdio_probe()` sets
+   up the common clock, drives the MDIO node's GPIO60 low for 100–110 ms
+   and high for another 100–110 ms, then sets the rate and enables
+   `gcc_mdio_ahb_clk` when available. With the bus accessors installed,
+   it calls `qca_mht_preinit()` **before** `of_mdiobus_register()`.
+   [QSDK MDIO probe and reset](../../qsdk/qca/src/linux-5.4/drivers/net/phy/mdio-qca.c)
+3. Preinit accesses the package registers through the controller. It
+   writes EPHY addresses 1–4 into 0x0c90f018. For this child order, the
+   allocator starts at 4, skips occupied slots and selects 5–7 for the
+   three UNIPHY fields in 0x0c90f014. These are values derived from the
+   source and DT. With the board's `mdio_clk_fixup`, it then enables and
+   resets both SerDes system clocks, gates EPHY GMII clocks, enables and
+   resets all four EPHY system clocks, releases DSP reset and applies
+   analog initialization. Ordinary PHY enumeration follows this work.
+   [QSDK address and clock routines](../../qsdk/qca/src/linux-5.4/drivers/net/phy/mdio-qca.c)
+
+**OpenWrt.** The BE7000 draft illustrates how the fork's QCA8084 driver
+can start from a declared identity. This is a candidate for BE10000.
+
+1. Linux 6.18 masks automatic scanning, walks the package children and
+   takes each address from `reg`. The draft supplies
+   `ethernet-phy-id004d.d180` on all four. For this Clause 22 form,
+   phylib creates the PHY device with the supplied ID, bypassing the
+   initial hardware ID read. This allows the QCA8084 driver to match
+   before a copper PHY responds at its final address. A sysfs PHY ID
+   alone therefore cannot validate cold discovery.
+   [OF package enumeration](https://github.com/torvalds/linux/blob/v6.18/drivers/net/mdio/of_mdio.c#L132-L169) ·
+   [PHY creation](https://github.com/torvalds/linux/blob/v6.18/drivers/net/mdio/fwnode_mdio.c#L124-L132) ·
+   [Draft PHY nodes](../extracted/qwrt-25.12.2-be10000/be7000-mainline.dts)
+2. On the first package probe, patches 0305–0306 use the parent MDIO bus
+   and the package's indirect register window to program the two address
+   registers. Those accesses use addresses derived from the internal
+   register number. They do not require a successful Clause 22 read at
+   the new copper address. The seven-entry DT property selects 1–7;
+   omission selects the driver's 0–6 defaults, overlapping the Xiaomi
+   AQR at 0. [Register access](../../target/linux/qualcommbe/patches-6.18/0305-net-phy-qca808x-Add-register-access-support-routines.patch) ·
+   [Address fixup](../../target/linux/qualcommbe/patches-6.18/0306-net-phy-qca808x-Add-QCA8084-probe-function.patch)
+3. The draft places the active-low GPIO60 reset on the MDIO bus.
+   Its sibling NSSCC MDIO device at 0x18 takes the common PLL's 50 MHz
+   reference and supplies clocks and resets to the package and its PHYs.
+   The NSSCC driver enables its input clock and can pulse a reset GPIO
+   if specified on its own node. The draft has no GPIO there. Its bus
+   node also omits explicit reset delays: Linux OF defaults to a 10 µs
+   pulse and zero post-delay, much shorter than the QSDK sequence.
+   Board reset timing is an independent cold-start variable.
+   [Draft MDIO tree](../extracted/qwrt-25.12.2-be10000/be7000-mainline.dts) ·
+   [Bus timing](https://github.com/torvalds/linux/blob/v6.18/drivers/net/mdio/of_mdio.c#L198-L214) ·
+   [NSSCC probe](https://github.com/torvalds/linux/blob/v6.18/drivers/clk/qcom/nsscc-qca8k.c#L2046-L2074)
+4. After address writes, package probe acquires shared clock handles,
+   sets up PCS/XPCS resources and deasserts the package reset
+   (`NSS_CC_GEPHY_FULL_ARES` in the draft). Each PHY's probe enables
+   its own GEPHY system clock and deasserts its system reset. Later,
+   `config_init` selects the package mode, enables analog efuse loading,
+   waits 10–11 ms and enables the shared operational clocks. These are
+   separate failure points after a DT-created PHY can already exist.
+   See target patches 0306, 0307, 0308 and 0310 in the
+   [qualcommbe series](../../target/linux/qualcommbe/patches-6.18/).
+
+**First hardware check.** On a power-on boot, capture GPIO60 timing and
+MDIO/NSSCC probe results, then verify actual Clause 22 ID-register
+reads at 1–4 after fixup, alongside the Clause 45 AQR at 0. Record
+package/child clock or reset errors before testing carrier and speed on
+each jack. A warm reboot can preserve bootloader setup. The source trace
+does not establish Xiaomi's minimum reset timing or power-on register
+contents.
+
+## Closing audit (original twenty rounds)
 
 | Check | Result |
 |---|---|

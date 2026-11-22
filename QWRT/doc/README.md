@@ -18,8 +18,19 @@ Read the reports in order; later reports refine earlier unknowns:
 12. [BE18000 mainline port risk research](be18000-port-risk-research.md)
 13. [BE10000 vs BE18000 QWRT: 20 OpenWrt gap rounds](be10000-be18000-openwrt-gap-rounds.md)
 
+The owner's router is the 6 GHz hardware conversion identified by QWRT as
+`xiaomi,be18000`. Start with the [modified-unit source comparison](be10000-be18000-openwrt-gap-rounds.md#owners-modified-be10000-be18000-firmware-profile)
+for the Ethernet reset and radio-profile differences between the saved
+working system and the installer-supplied QSDK13 image.
+
 ## Current conclusions
 
+- Phase A has a first offline `qualcommbe/ipq95xx` image for
+  `xiaomi,be18000`: FIT `config@al02-c4`, gzip `0x42080000`, UBI
+  `kernel`/`rootfs`/`rootfs_data`, the live 292,256-byte Xiaomi board-2,
+  and the live MIBIB partition table. Full hashes and inspection output
+  are in the [Phase A build manifest](be18000-phase-a-build-manifest.md).
+  This is not yet a hardware result; serial and RAM-FIT boot are next.
 - The custom radio mapping is PCI1/BDF1 (2.4G), PCI2/BDF2 (5G), PCI3/BDF4
   (6 GHz); PCI3 currently operates at 6135 MHz/320 MHz. The live unit was later
   moved to ch129/6595 by AWGN DCS; the port intentionally pins ch37/6135.
@@ -29,8 +40,9 @@ Read the reports in order; later reports refine earlier unknowns:
   profile, not the modified SKY85798 profile.
 - QWRT runs cold-boot calibration. The three `/data/vendor/wifi` cache files are
   zero-filled placeholders, not calibration. Backports 7.2 ath12k does **not**
-  enable cold-boot calibration (`CALDB_MEM_REGION_TYPE` paddr=0); enabling it
-  with caldb reserved memory is the main path to unblock 5G/6G calibration.
+  implement the verified QSDK PCI mode-7 sequence. Its PCI path can return a DMA
+  address for a requested CALDB segment. See the [mode and memory trace](be10000-be18000-openwrt-gap-rounds.md#pci3-mode-7-caldb-handoff-and-return-to-service).
+  See the [PCI3 board selection and calibration trace](be10000-be18000-openwrt-gap-rounds.md#pci3-6-ghz-board-selection-and-cold-boot-calibration).
 - The live 10G PHY is **Aquantia AQR113C**. `0:ETHPHYFW` is an MBN-wrapped Xiaomi
   AQR v5.6.7 firmware image loaded by U-Boot; the 0x28/0x60002 nvmem slice is
   valid. RTL8261N is not the live PHY.
@@ -115,7 +127,6 @@ plan's top risks. The two hardest items are the QCA8084 PHY/NSSCC/SerDes
 wiring (the upstream `qcom,qca8084-nsscc` clock/reset driver exists and is
 enabled, but the Xiaomi DTS does not instantiate it yet) and 5G/6G coldboot
 calibration (the mainline driver allocates a CALDB chunk but does not use the
-QSDK fixed region or coldboot INI). It also adds the missing FIT
-`append-bootargs` for `root=/dev/ubiblock0_1`, the QCN9224-vs-QCN9274
+QSDK fixed region or coldboot INI). The [BE10000 offline wired trace](be10000-be18000-openwrt-gap-rounds.md#be10000-wired-bring-up-trace-offline-2026-11-21) corrects the earlier FIT tooling recommendation and follows the six PPE ports through QSDK and OpenWrt. The risk research also covers the QCN9224-vs-QCN9274
 `firmware-2.bin` format gap, and the install/recovery caveat for a raw
 `factory.ubi`.

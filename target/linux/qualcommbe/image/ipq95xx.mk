@@ -43,6 +43,29 @@ define Device/linksys_ln6001
 endef
 TARGET_DEVICES += linksys_ln6001
 
+define Device/xiaomi_be18000
+	$(call Device/FitImage)
+	$(call Device/UbiFit)
+	DEVICE_VENDOR := Xiaomi
+	DEVICE_MODEL := BE18000
+	DEVICE_VARIANT := Pro Max
+	DEVICE_DTS := ipq9574-xiaomi-be18000
+	DEVICE_DTS_CONFIG := config@al02-c4
+	DEVICE_DTS_DIR := ../dts
+	KERNEL_LOADADDR := 0x42080000
+	SOC := ipq9574
+	BLOCKSIZE := 0x20000
+	PAGESIZE := 2048
+	SUBPAGESIZE := 2048
+	VID_HDR_OFFSET := 2048
+	IMAGE_SIZE := 199229440
+	DEVICE_PACKAGES := ath12k-firmware-qcn9274 ipq-wifi-xiaomi_be18000 \
+		kmod-ath12k kmod-qcom-ppe kmod-pcs-qcom-ipq9574 kmod-sfp \
+		kmod-hwmon-emc2305 kmod-hwmon-lm63 kmod-leds-pwm \
+		kmod-i2c-core kmod-pstore kmod-ramoops
+endef
+TARGET_DEVICES += xiaomi_be18000
+
 define Device/qcom_rdp433
 	$(call Device/FitImageLzma)
 	DEVICE_VENDOR := Qualcomm Technologies, Inc.
