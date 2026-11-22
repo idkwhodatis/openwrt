@@ -1,0 +1,488 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 22 Nov 2026 00:00:00 +0000
+Subject: [PATCH] net: phy: qca808x: finish QXGMII setup after the host PCS starts
+
+QCA8084 config_init runs while the PPE netdev is being registered. The
+IPQ9574 host PCS is configured only when phylink_start opens the port, so
+requiring BaseR link during PHY attachment creates a startup dependency
+that the host cannot satisfy. Continuing the XPCS reset without BaseR
+lock can also leave the receive path unusable.
+
+Prepare and calibrate the external SerDes at attach, then finish XPCS
+configuration and the package clocks from read_status after BaseR locks.
+Report link down while waiting so PHY polling can retry; preserve MDIO,
+calibration and reset errors. Select polling for QXGMII because copper
+interrupts do not report host PCS readiness.
+
+Serialize shared preparation and completion across all four PHYs. Mark
+each phase complete only on success, unwind clock enables on failure,
+and prevent channel configuration before the shared XPCS reset finishes.
+This avoids treating the package init-once claim as successful completion
+and allows a later initialization attempt without duplicate clock enables.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ drivers/net/phy/qcom/qca8084_serdes.c       |  96 +++++++++++++++++++++++-----------------
+ drivers/net/phy/qcom/qca8084_serdes.h       |   5 ++++++++++++++++++++++++----------------
+ drivers/net/phy/qcom/qca808x.c              | 204 ++++++++++++++++++++++++++--------------
+ 3 files changed, 192 insertions(+), 113 deletions(-)
+
+diff --git a/drivers/net/phy/qcom/qca8084_serdes.c b/drivers/net/phy/qcom/qca8084_serdes.c
+--- a/drivers/net/phy/qcom/qca8084_serdes.c
++++ b/drivers/net/phy/qcom/qca8084_serdes.c
+@@ -391,7 +391,7 @@
+ 
+ static int qca8084_do_calibration(struct mdio_device *mdio_dev)
+ {
+-	int ret;
++	int ret, val;
+ 
+ 	ret = mdiodev_modify(mdio_dev, PLL_POWER_ON_AND_RESET,
+ 			     PCS_ANA_SW_RESET, 0);
+@@ -405,33 +405,17 @@
+ 		return ret;
+ 
+ 	/* Wait calibration done */
+-	return read_poll_timeout(mdiodev_c45_read, ret,
+-				 (ret & CALIBRATION_DONE),
+-				 100, 100000, true, mdio_dev,
+-				 MDIO_MMD_PMAPMD, CALIBRATION4);
++	ret = read_poll_timeout(mdiodev_c45_read, val,
++				val < 0 || (val & CALIBRATION_DONE),
++				100, 100000, true, mdio_dev,
++				MDIO_MMD_PMAPMD, CALIBRATION4);
++	return val < 0 ? val : ret;
+ }
+ 
+ 
+ static int qca8084_xpcs_set_mode(struct mdio_device *xpcs_mdiodev)
+ {
+ 	int ret, val, i;
+-
+-	/* Configure BaseR mode */
+-	ret = mdiodev_c45_modify(xpcs_mdiodev, MDIO_MMD_PCS, PCS_CONTROL2,
+-				 PCS_TYPE_MASK,
+-				 FIELD_PREP(PCS_TYPE_MASK, PCS_TYPE_BASER));
+-	if (ret)
+-		return ret;
+-
+-	/* Wait BaseR link up */
+-	ret = read_poll_timeout(mdiodev_c45_read, val,
+-				(val & PCS_BASER_UP), 1000, 100000, true,
+-				xpcs_mdiodev,
+-				MDIO_MMD_PCS, PCS_STATUS1);
+-	if (ret) {
+-		dev_err(&xpcs_mdiodev->dev, "BaseR link failed!\n");
+-		return ret;
+-	}
+ 
+ 	/* Enable USXGMII mode */
+ 	ret = mdiodev_c45_modify(xpcs_mdiodev, MDIO_MMD_PCS, DIG_CTRL1,
+@@ -463,9 +447,11 @@
+ 
+ 	/* Wait XPCS reset done */
+ 	ret = read_poll_timeout(mdiodev_c45_read, val,
+-				!(val & DIG_CTRL1_XPCS_RESET),
++				val < 0 || !(val & DIG_CTRL1_XPCS_RESET),
+ 				1000, 100000, true, xpcs_mdiodev,
+ 				MDIO_MMD_PCS, DIG_CTRL1);
++	if (val < 0)
++		return val;
+ 	if (ret) {
+ 		dev_err(&xpcs_mdiodev->dev, "XPCS reset failed!\n");
+ 		return ret;
+@@ -554,43 +540,58 @@
+ 
+ 	ret = reset_control_deassert(pcs_data->rstc);
+ 	if (ret)
+-		return ret;
++		goto err_disable_clock;
+ 
+ 	/* IPG tunning selection for RX, TX and XGMII of all channels. */
+ 	ret = mdiodev_c45_modify(pcs_mdiodev, MDIO_MMD_PMAPMD,
+ 				 BYPASS_TUNNING_IPG,
+ 				 BYPASS_TUNNING_IPG_MASK, 0);
+ 	if (ret)
+-		return ret;
+-
+-	reset_control_assert(xpcs_data->rstc);
++		goto err_disable_clock;
++
++	ret = reset_control_assert(xpcs_data->rstc);
++	if (ret)
++		goto err_disable_clock;
+ 
+ 	ret = qca8084_pcs_set_interface_mode(pcs_mdiodev,
+ 					     PHY_INTERFACE_MODE_10G_QXGMII);
+ 	if (ret)
+-		return ret;
++		goto err_disable_clock;
+ 
+ 	/* Reset of 4 channels */
+ 	for (channel = 0; channel < QCA8084_CHANNEL_MAX; channel++) {
+ 		xpcs_ch = xpcs_data->xpcs_ch[channel];
+ 		ret = reset_control_reset(xpcs_ch.rstcs);
+ 		if (ret)
+-			return ret;
++			goto err_disable_clock;
+ 	}
+ 
+ 	ret = qca8084_do_calibration(pcs_mdiodev);
+ 	if (ret) {
+-		dev_err(&pcs_mdiodev->dev, "PCS calibration timeout!\n");
+-		return ret;
++		dev_err(&pcs_mdiodev->dev, "PCS calibration failed: %d\n", ret);
++		goto err_disable_clock;
+ 	}
+ 
+ 	/* Enable PCS SSC to fix mode */
+ 	ret = mdiodev_c45_modify(pcs_mdiodev, MDIO_MMD_PMAPMD,
+ 				 CDR_CONTRL, SSC_FIX_MODE, SSC_FIX_MODE);
+ 	if (ret)
+-		return ret;
+-
+-	return reset_control_deassert(xpcs_data->rstc);
++		goto err_disable_clock;
++
++	ret = reset_control_deassert(xpcs_data->rstc);
++	if (ret)
++		goto err_disable_clock;
++
++	/* The host PCS may not be configured until the netdev is opened. */
++	ret = mdiodev_c45_modify(xpcs_mdiodev, MDIO_MMD_PCS, PCS_CONTROL2,
++				 PCS_TYPE_MASK,
++				 FIELD_PREP(PCS_TYPE_MASK, PCS_TYPE_BASER));
++	if (!ret)
++		return 0;
++
++err_disable_clock:
++	clk_disable_unprepare(pcs_data->clks[PCS_CLK]);
++	return ret;
+ }
+ 
+ static int qca8084_xpcs_clock_parent_set(struct mdio_device *xpcs_mdiodev,
+@@ -617,8 +618,8 @@
+ 	return 0;
+ }
+ 
+-int qca8084_qxgmii_set_mode(struct mdio_device *xpcs_mdiodev,
+-			    struct mdio_device *pcs_mdiodev)
++int qca8084_qxgmii_prepare(struct mdio_device *xpcs_mdiodev,
++			   struct mdio_device *pcs_mdiodev)
+ {
+ 	int ret;
+ 
+@@ -626,11 +627,24 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = qca8084_pcs_set_mode(xpcs_mdiodev, pcs_mdiodev);
+-	if (ret)
+-		return ret;
+-
+-	return qca8084_xpcs_set_mode(xpcs_mdiodev);
++	return qca8084_pcs_set_mode(xpcs_mdiodev, pcs_mdiodev);
++}
++
++/* Return one when configured, zero while waiting for the host PCS, or an
++ * error. USXGMII/QXGMII and the XPCS reset must follow BaseR lock.
++ */
++int qca8084_qxgmii_start(struct mdio_device *xpcs_mdiodev)
++{
++	int ret;
++
++	ret = mdiodev_c45_read(xpcs_mdiodev, MDIO_MMD_PCS, PCS_STATUS1);
++	if (ret < 0)
++		return ret;
++	if (!(ret & PCS_BASER_UP))
++		return 0;
++
++	ret = qca8084_xpcs_set_mode(xpcs_mdiodev);
++	return ret ? ret : 1;
+ }
+ 
+ static int qca8084_pcs_ipg_tune_reset(struct mdio_device *mdio_dev,
+diff --git a/drivers/net/phy/qcom/qca8084_serdes.h b/drivers/net/phy/qcom/qca8084_serdes.h
+--- a/drivers/net/phy/qcom/qca8084_serdes.h
++++ b/drivers/net/phy/qcom/qca8084_serdes.h
+@@ -15,8 +15,9 @@
+ struct mdio_device *qca8084_package_xpcs_probe(struct device_node *xpcs_np);
+ void qca8084_package_xpcs_and_pcs_remove(struct mdio_device *xpcs_mdiodev,
+ 					 struct mdio_device *pcs_mdiodev);
+-int qca8084_qxgmii_set_mode(struct mdio_device *xpcs_mdiodev,
+-			    struct mdio_device *pcs_mdiodev);
++int qca8084_qxgmii_prepare(struct mdio_device *xpcs_mdiodev,
++			   struct mdio_device *pcs_mdiodev);
++int qca8084_qxgmii_start(struct mdio_device *xpcs_mdiodev);
+ void qca8084_qxgmii_set_speed(struct mdio_device *xpcs_mdiodev,
+ 			      struct mdio_device *pcs_mdiodev,
+ 			      int channel, int speed);
+diff --git a/drivers/net/phy/qcom/qca808x.c b/drivers/net/phy/qcom/qca808x.c
+--- a/drivers/net/phy/qcom/qca808x.c
++++ b/drivers/net/phy/qcom/qca808x.c
+@@ -2,6 +2,7 @@
+ 
+ #include <linux/phy.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
+ #include <linux/reset.h>
+ #include <linux/clk.h>
+@@ -181,7 +182,14 @@
+ 	int package_mode;
+ 	struct clk *clk[PACKAGE_CLK_MAX];
+ 	struct mdio_device *mdiodev[2];	/* PCS and XPCS mdio device */
++	bool package_prepared;
++	bool package_initialized;
+ };
++
++/* The four PHY state machines share the package configuration. A static
++ * lock also makes serialization available before any package is probed.
++ */
++static DEFINE_MUTEX(qca8084_package_lock);
+ 
+ static const char *const qca8084_package_clk_name[PACKAGE_CLK_MAX] = {
+ 	[APB_BRIDGE_CLK] =	"apb_bridge",
+@@ -860,7 +868,12 @@
+ 
+ static int qca8084_package_clock_init(struct qca808x_shared_priv *shared_priv)
+ {
+-	int ret;
++	static const unsigned int clock_order[] = {
++		SWITCH_CORE_CLK, APB_BRIDGE_CLK, AHB_CLK, SEC_CTRL_AHB_CLK,
++		TLMM_CLK, TLMM_AHB_CLK, CNOC_AHB_CLK, MDIO_MASTER_AHB_CLK,
++		MDIO_AHB_CLK,
++	};
++	int ret, i;
+ 
+ 	/* Configure clock rate 312.5MHZ for the PHY package
+ 	 * APB bridge clock tree.
+@@ -869,49 +882,28 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = clk_prepare_enable(shared_priv->clk[SWITCH_CORE_CLK]);
+-	if (ret)
+-		return ret;
+-
+-	ret = clk_prepare_enable(shared_priv->clk[APB_BRIDGE_CLK]);
+-	if (ret)
+-		return ret;
+-
+-	/* Configure clock rate 104.17MHZ for the PHY package
+-	 * AHB clock tree.
+-	 */
+-	ret = clk_set_rate(shared_priv->clk[AHB_CLK], 104170000);
+-	if (ret)
+-		return ret;
+-
+-	ret = clk_prepare_enable(shared_priv->clk[AHB_CLK]);
+-	if (ret)
+-		return ret;
+-
+-	ret = clk_prepare_enable(shared_priv->clk[SEC_CTRL_AHB_CLK]);
+-	if (ret)
+-		return ret;
+-
+-	ret = clk_prepare_enable(shared_priv->clk[TLMM_CLK]);
+-	if (ret)
+-		return ret;
+-
+-	ret = clk_prepare_enable(shared_priv->clk[TLMM_AHB_CLK]);
+-	if (ret)
+-		return ret;
+-
+-	ret = clk_prepare_enable(shared_priv->clk[CNOC_AHB_CLK]);
+-	if (ret)
+-		return ret;
+-
+-	ret = clk_prepare_enable(shared_priv->clk[MDIO_MASTER_AHB_CLK]);
+-	if (ret)
+-		return ret;
+-
+-	return clk_prepare_enable(shared_priv->clk[MDIO_AHB_CLK]);
+-}
+-
+-static int qca8084_phy_package_config_init_once(struct phy_device *phydev)
++	for (i = 0; i < ARRAY_SIZE(clock_order); i++) {
++		/* Preserve the AHB rate change after enabling the APB bridge. */
++		if (clock_order[i] == AHB_CLK) {
++			ret = clk_set_rate(shared_priv->clk[AHB_CLK], 104170000);
++			if (ret)
++				goto err_disable_clocks;
++		}
++
++		ret = clk_prepare_enable(shared_priv->clk[clock_order[i]]);
++		if (ret)
++			goto err_disable_clocks;
++	}
++
++	return 0;
++
++err_disable_clocks:
++	while (i--)
++		clk_disable_unprepare(shared_priv->clk[clock_order[i]]);
++	return ret;
++}
++
++static int qca8084_phy_package_prepare(struct phy_device *phydev)
+ {
+ 	struct qca808x_shared_priv *shared_priv;
+ 	int ret, mode;
+@@ -947,35 +939,49 @@
+ 
+ 	usleep_range(10000, 11000);
+ 
+-	/* Configure PCS working on 10G-QXGMII mode */
++	/* Prepare the receiver without requiring an active host PCS. */
++	if (phydev->interface == PHY_INTERFACE_MODE_10G_QXGMII)
++		return qca8084_qxgmii_prepare(shared_priv->mdiodev[1],
++					     shared_priv->mdiodev[0]);
++
++	return 0;
++}
++
++static int qca8084_config_init(struct phy_device *phydev)
++{
++	struct qca808x_shared_priv *shared_priv = phy_package_get_priv(phydev);
++	int ret = 0;
++
++	mutex_lock(&qca8084_package_lock);
++	if (!shared_priv->package_prepared) {
++		ret = qca8084_phy_package_prepare(phydev);
++		if (ret)
++			goto unlock;
++		shared_priv->package_prepared = true;
++	}
++
++	if (phydev->interface != PHY_INTERFACE_MODE_10G_QXGMII &&
++	    !shared_priv->package_initialized) {
++		ret = qca8084_package_clock_init(shared_priv);
++		if (ret)
++			goto unlock;
++		shared_priv->package_initialized = true;
++	}
++unlock:
++	mutex_unlock(&qca8084_package_lock);
++	if (ret)
++		return ret;
++
+ 	if (phydev->interface == PHY_INTERFACE_MODE_10G_QXGMII) {
+-		ret = qca8084_qxgmii_set_mode(shared_priv->mdiodev[1],
+-					      shared_priv->mdiodev[0]);
+-		if (ret)
+-			return ret;
+-	}
+-
+-	/* Initialize the PHY package clock and reset, which is the
+-	 * necessary config sequence after GPIO reset on the PHY package.
+-	 */
+-	return qca8084_package_clock_init(shared_priv);
+-}
+-
+-static int qca8084_config_init(struct phy_device *phydev)
+-{
+-	int ret;
+-
+-	if (phy_package_init_once(phydev)) {
+-		ret = qca8084_phy_package_config_init_once(phydev);
+-		if (ret)
+-			return ret;
+-	}
+-
+-	if (phydev->interface == PHY_INTERFACE_MODE_10G_QXGMII)
++		/* Copper link interrupts cannot signal BaseR readiness. Select
++		 * polling before phylib requests the PHY interrupt at attach.
++		 */
++		phydev->irq = PHY_POLL;
+ 		__set_bit(PHY_INTERFACE_MODE_10G_QXGMII,
+ 			  phydev->possible_interfaces);
+-	else
++	} else {
+ 		qca808x_fill_possible_interfaces(phydev);
++	}
+ 
+ 	/* Configure the ADC to convert the signal using falling edge
+ 	 * instead of the default rising edge.
+@@ -993,6 +999,49 @@
+ 	return phy_write_mmd(phydev, MDIO_MMD_PMAPMD,
+ 			     QCA8084_MSE_THRESHOLD,
+ 			     QCA8084_MSE_THRESHOLD_2P5G_VAL);
++}
++
++static int qca8084_read_status(struct phy_device *phydev)
++{
++	struct qca808x_shared_priv *shared_priv = phy_package_get_priv(phydev);
++	int ret = 1;
++
++	if (phydev->interface != PHY_INTERFACE_MODE_10G_QXGMII)
++		return qca808x_read_status(phydev);
++
++	/* phylink configures the host PCS before starting the PHY state
++	 * machine. Finish the shared XPCS setup only after BaseR has locked;
++	 * doing the QXGMII reset earlier can leave its receive path unusable.
++	 */
++	mutex_lock(&qca8084_package_lock);
++	if (!shared_priv->package_initialized) {
++		ret = qca8084_qxgmii_start(shared_priv->mdiodev[1]);
++		if (ret <= 0)
++			goto unlock;
++
++		/* These clocks follow XPCS setup in the hardware sequence. */
++		ret = qca8084_package_clock_init(shared_priv);
++		if (ret)
++			goto unlock;
++
++		shared_priv->package_initialized = true;
++		ret = 1;
++	}
++unlock:
++	mutex_unlock(&qca8084_package_lock);
++	if (ret < 0)
++		return ret;
++	if (!ret) {
++		/* Waiting for the host is normal link-down, not PHY_ERROR. */
++		phydev->link = 0;
++		phydev->speed = SPEED_UNKNOWN;
++		phydev->duplex = DUPLEX_UNKNOWN;
++		phydev->pause = 0;
++		phydev->asym_pause = 0;
++		return 0;
++	}
++
++	return qca808x_read_status(phydev);
+ }
+ 
+ static void qca8084_link_change_notify(struct phy_device *phydev)
+@@ -1007,6 +1056,21 @@
+ 	if (ret) {
+ 		phydev_err(phydev, "Asserting PHY FIFO failed\n");
+ 		return;
++	}
++
++	if (phydev->interface == PHY_INTERFACE_MODE_10G_QXGMII) {
++		shared_priv = phy_package_get_priv(phydev);
++
++		/* Notifications can precede deferred XPCS setup. Keep the PHY
++		 * FIFO asserted and do not touch channel registers or clocks
++		 * until the shared reset and configuration are done.
++		 */
++		mutex_lock(&qca8084_package_lock);
++		if (!shared_priv->package_initialized) {
++			mutex_unlock(&qca8084_package_lock);
++			return;
++		}
++		mutex_unlock(&qca8084_package_lock);
+ 	}
+ 
+ 	/* If the PHY is in 10G_QXGMII mode, the FIFO needs to be kept in
+@@ -1258,7 +1322,7 @@
+ 	.config_aneg		= qca808x_config_aneg,
+ 	.suspend		= genphy_suspend,
+ 	.resume			= genphy_resume,
+-	.read_status		= qca808x_read_status,
++	.read_status		= qca8084_read_status,
+ 	.soft_reset		= qca808x_soft_reset,
+ 	.cable_test_start	= qca808x_cable_test_start,
+ 	.cable_test_get_status	= qca808x_cable_test_get_status,
