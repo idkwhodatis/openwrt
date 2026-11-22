@@ -1,0 +1,407 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenWrt BE18000 port <openwrt@example.invalid>
+Date: Sun, 22 Nov 2026 00:00:00 +0000
+Subject: [PATCH] ath12k: add opt-in QCN9274 coldboot calibration
+
+Add the QMI side of coldboot calibration for QCN9274 hw2.0 devices such
+as the QCN9224 radios on the Xiaomi BE18000.  The implementation is
+disabled by default and requires an explicit module parameter:
+
+    ath12k.cold_boot_cal=1
+
+When enabled, the first firmware boot is switched to calibration mode
+(7) after the FW_READY indication.  The driver decodes the CAL_DONE
+indication (0x3e), keeps the CALDB target-memory DMA allocation alive
+across the reset, and power-cycles the firmware into mission mode.  The
+mission-mode host-cap request carries cal_done=1 so the firmware reuses
+the calibration data.
+
+Coldboot host-cap requests are issued per chip without MLO capabilities.
+Group host-cap negotiation is deferred while any radio in the group is
+still coldboot-pending, and mission-mode partner triggers skip pending
+chips, so no radio receives a second HOST_CAP during calibration.  MLO
+is advertised only after the whole group has completed calibration.
+
+The reset runs from a work item rather than from the PCI probe or the
+hardware-group lock.  The group lock protects target-memory allocation,
+so waiting for CAL_DONE while holding it would deadlock against the QMI
+memory-request worker.  Teardown cancels the work before HIF power-down
+and before the QMI handle is released.
+
+The default target-memory mode is required: the fixed-memory path does
+not yet describe a CALDB reserved-memory region.  Only QCN9274 hw2.0 is
+accepted.  Hardware validation of PCIe enumeration, firmware CAL_DONE
+timing and MLO after coldboot is still required.
+
+Signed-off-by: OpenWrt BE18000 port <openwrt@example.invalid>
+---
+--- a/drivers/net/wireless/ath/ath12k/qmi.c
++++ b/drivers/net/wireless/ath/ath12k/qmi.c
+@@ -5,10 +5,12 @@
+  */
+ 
+ #include <linux/elf.h>
++#include <linux/module.h>
+ 
+ #include "qmi.h"
+ #include "core.h"
+ #include "debug.h"
++#include "hif.h"
+ #include <linux/of.h>
+ #include <linux/firmware.h>
+ #include <linux/of_address.h>
+@@ -19,6 +21,17 @@
+ #define PLATFORM_CAP_PCIE_GLOBAL_RESET	0x08
+ #define ATH12K_QMI_MAX_CHUNK_SIZE	2097152
+ 
++static bool ath12k_cold_boot_cal;
++module_param_named(cold_boot_cal, ath12k_cold_boot_cal, bool, 0444);
++MODULE_PARM_DESC(cold_boot_cal,
++		 "Enable QCN9274 coldboot calibration (default: disabled)");
++
++bool ath12k_qmi_cold_boot_pending(struct ath12k_base *ab)
++{
++	return ab->qmi.cold_boot_cal && !ab->qmi.cal_done &&
++	       !ab->qmi.cal_timeout;
++}
++
+ static const struct qmi_elem_info wlfw_host_mlo_chip_info_s_v01_ei[] = {
+ 	{
+ 		.data_type      = QMI_UNSIGNED_1_BYTE,
+@@ -2015,6 +2028,32 @@
+ 	},
+ };
+ 
++static const struct qmi_elem_info wlfw_cal_done_ind_msg_v01_ei[] = {
++	{
++		.data_type	= QMI_OPT_FLAG,
++		.elem_len	= 1,
++		.elem_size	= sizeof(u8),
++		.array_type	= NO_ARRAY,
++		.tlv_type	= 0x10,
++		.offset		= offsetof(struct wlfw_cal_done_ind_msg_v01,
++					   cal_file_upload_size_valid),
++	},
++	{
++		.data_type	= QMI_UNSIGNED_8_BYTE,
++		.elem_len	= 1,
++		.elem_size	= sizeof(u64),
++		.array_type	= NO_ARRAY,
++		.tlv_type	= 0x10,
++		.offset		= offsetof(struct wlfw_cal_done_ind_msg_v01,
++					   cal_file_upload_size),
++	},
++	{
++		.data_type	= QMI_EOTI,
++		.array_type	= NO_ARRAY,
++		.tlv_type	= QMI_COMMON_TLV_TYPE,
++	},
++};
++
+ static const struct qmi_elem_info qmi_wlanfw_wlan_ini_req_msg_v01_ei[] = {
+ 	{
+ 		.data_type	= QMI_OPT_FLAG,
+@@ -2092,6 +2131,12 @@
+ 	u8 hw_link_id = 0;
+ 	int i, j, ret;
+ 
++	if (ath12k_qmi_cold_boot_pending(ab)) {
++		ath12k_dbg(ab, ATH12K_DBG_QMI,
++			   "skip QMI MLO cap during coldboot calibration\n");
++		return 0;
++	}
++
+ 	if (!ag->mlo_capable) {
+ 		ath12k_dbg(ab, ATH12K_DBG_QMI,
+ 			   "MLO is disabled hence skip QMI MLO cap");
+@@ -3633,6 +3678,98 @@
+ 	return 0;
+ }
+ 
++static int ath12k_qmi_process_coldboot_calibration(struct ath12k_base *ab)
++{
++	int ret;
++
++	ab->qmi.cold_boot_started = true;
++
++	ret = ath12k_qmi_wlanfw_wlan_ini_send(ab);
++	if (ret) {
++		ath12k_warn(ab, "coldboot wlan ini request failed: %d\n", ret);
++		goto out;
++	}
++
++	ret = ath12k_qmi_wlanfw_mode_send(ab,
++					  ATH12K_FIRMWARE_MODE_CALIBRATION);
++	if (ret) {
++		ath12k_warn(ab, "coldboot mode request failed: %d\n", ret);
++		goto out;
++	}
++
++	ath12k_info(ab, "coldboot calibration started\n");
++	return 0;
++
++out:
++	/* Let the reset path fall back to a mission-mode boot. */
++	ab->qmi.cal_timeout = true;
++	complete_all(&ab->qmi.cal_done_completion);
++	return ret;
++}
++
++static void ath12k_qmi_cold_boot_work(struct work_struct *work)
++{
++	struct ath12k_qmi *qmi = container_of(work, struct ath12k_qmi,
++					      cold_boot_work);
++	struct ath12k_base *ab = qmi->ab;
++	unsigned long timeout;
++	int ret;
++
++	if (!qmi->cold_boot_cal || qmi->cal_done || qmi->cal_timeout)
++		return;
++
++	ath12k_dbg(ab, ATH12K_DBG_QMI, "wait for coldboot calibration\n");
++	timeout = wait_for_completion_timeout(&qmi->cal_done_completion,
++					      msecs_to_jiffies(ATH12K_COLD_BOOT_TIMEOUT_MS));
++	if (!timeout) {
++		ath12k_warn(ab, "coldboot calibration timed out\n");
++		qmi->cal_timeout = true;
++	}
++
++	if (qmi->cold_boot_cancelled)
++		return;
++
++	if (!qmi->cal_done && !qmi->cal_timeout) {
++		/* A completion without CAL_DONE must not keep the firmware
++		 * in calibration mode forever.
++		 */
++		qmi->cal_timeout = true;
++	}
++
++	/* Keep target_mem[] mapped: the CALDB DMA buffer holds the
++	 * calibration result consumed by the mission-mode boot.
++	 */
++	ath12k_info(ab, "restarting firmware in mission mode after coldboot\n");
++	ath12k_qmi_firmware_stop(ab);
++	ath12k_hif_power_down(ab, false);
++
++	if (qmi->cold_boot_cancelled)
++		return;
++
++	ret = ath12k_hif_power_up(ab);
++	if (ret)
++		ath12k_err(ab, "failed to power up after coldboot: %d\n", ret);
++}
++
++void ath12k_qmi_schedule_cold_boot(struct ath12k_base *ab)
++{
++	if (!ab->qmi.cold_boot_cal || ab->qmi.cal_done ||
++	    ab->qmi.cal_timeout)
++		return;
++
++	queue_work(system_wq, &ab->qmi.cold_boot_work);
++}
++
++void ath12k_qmi_cancel_cold_boot(struct ath12k_base *ab)
++{
++	if (!ab->qmi.ab)
++		return;
++
++	ab->qmi.cold_boot_cancelled = true;
++	complete_all(&ab->qmi.cal_done_completion);
++	cancel_work_sync(&ab->qmi.cold_boot_work);
++}
++
+ static int
+ ath12k_qmi_driver_event_post(struct ath12k_qmi *qmi,
+ 			     enum ath12k_qmi_event_type type,
+@@ -3683,6 +3820,9 @@
+ 
+ 		if (!(ab && ab->qmi.num_radios != U8_MAX))
+ 			return false;
++
++		if (ath12k_qmi_cold_boot_pending(ab))
++			return false;
+ 	}
+ 
+ 	return true;
+@@ -3729,6 +3869,11 @@
+ 		return ret;
+ 	}
+ 
++	if (ath12k_qmi_cold_boot_pending(ab)) {
++		ath12k_qmi_trigger_host_cap(ab);
++		return ret;
++	}
++
+ 	spin_lock(&qmi->event_lock);
+ 
+ 	ath12k_qmi_set_event_block(qmi, true);
+@@ -3884,6 +4029,28 @@
+ 	ath12k_qmi_driver_event_post(qmi, ATH12K_QMI_EVENT_FW_READY, NULL);
+ }
+ 
++static void ath12k_qmi_msg_cal_done_cb(struct qmi_handle *qmi_hdl,
++				       struct sockaddr_qrtr *sq,
++				       struct qmi_txn *txn,
++				       const void *data)
++{
++	struct ath12k_qmi *qmi = container_of(qmi_hdl, struct ath12k_qmi,
++					      handle);
++	struct ath12k_base *ab = qmi->ab;
++	const struct wlfw_cal_done_ind_msg_v01 *ind = data;
++
++	ath12k_dbg(ab, ATH12K_DBG_QMI,
++		   "qmi coldboot calibration done, cal file size %llu\n",
++		   ind->cal_file_upload_size_valid ?
++		   (unsigned long long)ind->cal_file_upload_size : 0ULL);
++
++	if (!qmi->cold_boot_cal || qmi->cal_done)
++		return;
++
++	qmi->cal_done = 1;
++	complete(&qmi->cal_done_completion);
++}
++
+ static const struct qmi_msg_handler ath12k_qmi_msg_handlers[] = {
+ 	{
+ 		.type = QMI_INDICATION,
+@@ -3906,6 +4073,13 @@
+ 		.decoded_size = sizeof(struct qmi_wlanfw_fw_ready_ind_msg_v01),
+ 		.fn = ath12k_qmi_msg_fw_ready_cb,
+ 	},
++	{
++		.type = QMI_INDICATION,
++		.msg_id = QMI_WLFW_CAL_DONE_IND_V01,
++		.ei = wlfw_cal_done_ind_msg_v01_ei,
++		.decoded_size = sizeof(struct wlfw_cal_done_ind_msg_v01),
++		.fn = ath12k_qmi_msg_cal_done_cb,
++	},
+ 
+ 	/* end of list */
+ 	{},
+@@ -4014,6 +4188,12 @@
+ 				break;
+ 			}
+ 
++			if (ath12k_qmi_cold_boot_pending(ab)) {
++				if (!ab->qmi.cold_boot_started)
++					ath12k_qmi_process_coldboot_calibration(ab);
++				break;
++			}
++
+ 			clear_bit(ATH12K_FLAG_CRASH_FLUSH,
+ 				  &ab->dev_flags);
+ 			ret = ath12k_core_qmi_firmware_ready(ab);
+@@ -4046,6 +4226,11 @@
+ 	memset(&ab->qmi.target, 0, sizeof(struct target_info));
+ 	memset(&ab->qmi.target_mem, 0, sizeof(struct target_mem_chunk));
+ 	ab->qmi.ab = ab;
++	init_completion(&ab->qmi.cal_done_completion);
++	ab->qmi.cold_boot_cancelled = false;
++	ab->qmi.cold_boot_cal = ath12k_cold_boot_cal &&
++		ab->target_mem_mode == ATH12K_QMI_MEMORY_MODE_DEFAULT &&
++		ab->hw_rev == ATH12K_HW_QCN9274_HW20;
+ 
+ 	ab->qmi.target_mem_mode = ab->target_mem_mode;
+ 	ret = qmi_handle_init(&ab->qmi.handle, ATH12K_QMI_RESP_LEN_MAX,
+@@ -4064,6 +4249,7 @@
+ 	INIT_LIST_HEAD(&ab->qmi.event_list);
+ 	spin_lock_init(&ab->qmi.event_lock);
+ 	INIT_WORK(&ab->qmi.event_work, ath12k_qmi_driver_event_work);
++	INIT_WORK(&ab->qmi.cold_boot_work, ath12k_qmi_cold_boot_work);
+ 
+ 	ret = qmi_add_lookup(&ab->qmi.handle, QMI_SERVICE_ID_WLFW,
+ 			     ATH12K_QMI_WLFW_SERVICE_VERS_V01,
+@@ -4082,6 +4268,7 @@
+ 	if (!ab->qmi.ab)
+ 		return;
+ 
++	ath12k_qmi_cancel_cold_boot(ab);
+ 	qmi_handle_release(&ab->qmi.handle);
+ 	cancel_work_sync(&ab->qmi.event_work);
+ 	destroy_workqueue(ab->qmi.event_wq);
+--- a/drivers/net/wireless/ath/ath12k/qmi.h
++++ b/drivers/net/wireless/ath/ath12k/qmi.h
+@@ -7,6 +7,7 @@
+ #ifndef ATH12K_QMI_H
+ #define ATH12K_QMI_H
+ 
++#include <linux/completion.h>
+ #include <linux/mutex.h>
+ #include <linux/soc/qcom/qmi.h>
+ 
+@@ -33,9 +34,12 @@
+ #define QMI_WLFW_REQUEST_MEM_IND_V01		0x0035
+ #define QMI_WLFW_FW_MEM_READY_IND_V01		0x0037
+ #define QMI_WLFW_FW_READY_IND_V01		0x0038
++#define QMI_WLFW_CAL_DONE_IND_V01		0x003E
+ 
+ #define QMI_WLANFW_MAX_DATA_SIZE_V01		6144
+ #define ATH12K_FIRMWARE_MODE_OFF		4
++#define ATH12K_FIRMWARE_MODE_CALIBRATION	7
++#define ATH12K_COLD_BOOT_TIMEOUT_MS		60000
+ 
+ #define ATH12K_BOARD_ID_DEFAULT	0xFF
+ 
+@@ -132,6 +136,11 @@
+ 	u64 size;
+ };
+ 
++struct wlfw_cal_done_ind_msg_v01 {
++	u8 cal_file_upload_size_valid;
++	u64 cal_file_upload_size;
++};
++
+ struct ath12k_qmi {
+ 	struct ath12k_base *ab;
+ 	struct qmi_handle handle;
+@@ -146,6 +155,12 @@
+ 	u32 target_mem_mode;
+ 	bool target_mem_delayed;
+ 	u8 cal_done;
++	bool cal_timeout;
++	bool cold_boot_cal;
++	bool cold_boot_started;
++	bool cold_boot_cancelled;
++	struct completion cal_done_completion;
++	struct work_struct cold_boot_work;
+ 
+ 	/* protected with struct ath12k_qmi::event_lock */
+ 	bool block_event;
+@@ -645,6 +660,9 @@
+ int ath12k_qmi_init_service(struct ath12k_base *ab);
+ void ath12k_qmi_free_resource(struct ath12k_base *ab);
+ void ath12k_qmi_trigger_host_cap(struct ath12k_base *ab);
++bool ath12k_qmi_cold_boot_pending(struct ath12k_base *ab);
++void ath12k_qmi_schedule_cold_boot(struct ath12k_base *ab);
++void ath12k_qmi_cancel_cold_boot(struct ath12k_base *ab);
+ void ath12k_qmi_reset_mlo_mem(struct ath12k_hw_group *ag);
+ 
+ #endif
+--- a/drivers/net/wireless/ath/ath12k/core.c
++++ b/drivers/net/wireless/ath/ath12k/core.c
+@@ -857,6 +857,8 @@
+ 		goto err_qmi_deinit;
+ 	}
+ 
++	ath12k_qmi_schedule_cold_boot(ab);
++
+ 	return 0;
+ 
+ err_qmi_deinit:
+@@ -867,6 +869,7 @@
+ 
+ static void ath12k_core_soc_destroy(struct ath12k_base *ab)
+ {
++	ath12k_qmi_cancel_cold_boot(ab);
+ 	ath12k_hif_power_down(ab, false);
+ 	ath12k_reg_free(ab);
+ 	ath12k_debugfs_soc_destroy(ab);
+@@ -1323,7 +1326,7 @@
+ 		if (!partner_ab)
+ 			continue;
+ 
+-		if (found)
++		if (found && !ath12k_qmi_cold_boot_pending(partner_ab))
+ 			ath12k_qmi_trigger_host_cap(partner_ab);
+ 
+ 		found = (partner_ab == ab);

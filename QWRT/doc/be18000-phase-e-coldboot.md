@@ -1,44 +1,74 @@
-# BE18000 Phase E: coldboot calibration porting brief
+# BE18000 Phase E: coldboot calibration status
 
 Date: 2026-11-22
 
-Status: **not enabled**.  The offline image keeps the normal ath12k
-mission-mode path.  This brief records the exact work and evidence
-needed before a coldboot patch can be merged or enabled on hardware.
+Status: **implemented behind an explicit opt-in, not enabled in the
+default image.**  The offline build carries the coldboot QMI lifecycle
+in `ath12k`, but the module parameter defaults to off and no hardware
+has run the sequence yet.  Normal mission-mode boot remains the default.
 
-## Why it is not enabled yet
+## Implementation
 
-- Backports 7.2 in this tree has no `QMI_WLFW_CAL_DONE_IND_V01`
-  handler, no coldboot mode-7 request, no `cal_done` waitqueue, and no
-  OFF/power-down/power-up/restart transition for calibration.
-- The QSDK ath12k patches `670-ath12k-Add-support-for-cold-boot-calibartion`
-  and `703-ath12k-fix-cold-boot-sequence-for-SoC-grouping` are deltas on
-  a vendor ath12k base that already contains that lifecycle.  They do
-  not apply to the mainline backports 7.2 source.
-- The live QSDK driver uses cnss2's separate coldboot state machine
-  (`qca-cnss/main.c`, `qmi.c`), including `cal_done`, `cal_timeout`,
-  mode 7, CALDB upload, and a firmware power cycle before mission mode.
-- Blank ART high-band slices and zero-filled `/data/vendor/wifi` caches
-  are not calibration and must not be used as a shortcut.
+The feature is in the mac80211 package patch
+`package/kernel/mac80211/patches/ath12k/701-ath12k-add-opt-in-coldboot-calibration.patch`.
+It is compiled into `kmod-ath12k` and only activates when the module is
+loaded with:
 
-## Required mainline work
+```text
+ath12k.cold_boot_cal=1
+```
 
-1. Add the `CAL_DONE` QMI indication message/EI and a per-`ath12k_base`
-   completion/waitqueue.
-2. Send the device/firmware-scoped calibration mode (vendor mode 7)
-   before mission mode, only when explicitly opted in.
-3. Let the existing CALDB DMA chunk allocation run when firmware
-   requests `CALDB_MEM_REGION_TYPE`; keep the backing alive through the
-   OFF/restart and second `HOST_CAP`.
-4. Handle CAL_DONE, timeout and duplicate/stale indications; set
-   `ab->qmi.cal_done` only for the active boot attempt.
-5. Perform a controlled firmware power cycle after CAL_DONE or timeout,
-   then send mission-mode `HOST_CAP` with TLV `0x1a` reflecting
-   `cal_done`.
-6. Skip MLO capability in the coldboot `HOST_CAP`; send it only in
-   mission mode.
-7. Gate the feature on a board/firmware opt-in (DT property or module
-   parameter, default off) and keep wired management independent.
+It implements:
+
+- `QMI_WLFW_CAL_DONE_IND_V01` (`0x003e`) with the vendor TLV layout.
+- Calibration mode 7 after the first `FW_READY` indication.
+- A per-radio completion and a separate work item for the CAL_DONE wait,
+  so the hardware-group mutex is never held while QMI target-memory
+  allocation runs.
+- CALDB target-memory DMA lifetime across the firmware reset; the
+  mission-mode boot reuses the same chunks.
+- `WLAN_MODE_OFF`, HIF power-down, HIF power-up and a second `HOST_CAP`
+  carrying `cal_done=1`.
+- MLO capability suppressed in the coldboot `HOST_CAP` and advertised
+  only after every radio has completed calibration.
+- Group host-cap negotiation is deferred while any radio is still
+  coldboot-pending, and mission-mode partner triggers skip those radios,
+  so calibration is not interrupted by a second `HOST_CAP`.
+- A 60-second CAL_DONE timeout with a mission-mode fallback.
+- Cancellation before HIF teardown and QMI handle release.
+- Gating on QCN9274 hw2.0 and the default (DMA) target-memory mode.
+
+The fixed-memory target path remains excluded because
+`CALDB_MEM_REGION_TYPE` has no reserved-memory region there; only the
+ordinary PCI DMA path is accepted.
+
+## Why it is off by default
+
+- The official QCN9274 `firmware-2.bin` has not been observed accepting
+  mode 7 or requesting `CALDB_MEM_REGION_TYPE` on the QCN9224.
+- The QSDK flow also loads QCN9224 INI files and uses fixed `caldb-addr`
+  windows that mainline does not consume.  The patch is the mainline QMI
+  equivalent, not a drop-in replacement for the vendor firmware plumbing.
+- A boot that reaches firmware without CAL_DONE is a failure, not a
+  pass.  Blank ART high-band slices and zero-filled
+  `/data/vendor/wifi` caches are still forbidden as calibration input.
+- Wired management is independent: a coldboot failure only affects
+  Wi-Fi probe and cannot block LAN/WAN boot.
+
+## Enabling for a hardware experiment
+
+Add a module option to `/etc/modules.conf` (OpenWrt's `kmodloader`
+reads its `options` lines from there):
+
+```text
+options ath12k cold_boot_cal=1
+```
+
+Alternatively append `ath12k.cold_boot_cal=1` to the kernel command
+line.  A serial
+console and the full QMI trace must be captured before enabling this on
+a production unit.  The known-good image should remain available for
+recovery.
 
 ## Hardware evidence to collect
 
@@ -50,11 +80,11 @@ needed before a coldboot patch can be merged or enabled on hardware.
 - A rejected/timeout path and a second-boot/unload/recovery path.
 - Sane txpower/rates and a 5G/6G association, plus wired traffic
   throughout.
+- MLO only after all three radios pass coldboot and mission mode.
 
 ## Acceptance
 
-Do not enable the feature from this brief alone.  A boot that reaches
-firmware without calibration completion is a failure, not a pass.  If
-the candidate firmware cannot support the sequence, keep the normal
+Do not enable the feature by default from this document alone.  If the
+candidate firmware cannot support the sequence, keep the normal
 mission-mode path and report the radio limitation rather than installing
 invalid caldata.
