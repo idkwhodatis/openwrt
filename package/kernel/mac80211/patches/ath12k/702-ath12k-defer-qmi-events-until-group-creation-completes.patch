@@ -1,0 +1,258 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 22 Nov 2026 00:00:00 +0000
+Subject: [PATCH] ath12k: defer QMI events until group creation completes
+
+Hardware-group creation holds the group mutex while creating and powering
+up each SoC. QMI discovery on an earlier SoC can already queue an event
+worker that waits for the same mutex. If a later power-up fails, rollback
+cancels that worker while retaining the group mutex and never completes.
+This can stall synchronous module loading before network and SSH startup.
+
+Prepare the QMI handle and retain discovered events without running their
+handlers. Activate event processing and optional coldboot work only after
+all SoCs have powered up, as the final infallible step of group creation.
+MHI power-up waits for mission mode independently of QMI event handling.
+Thus failed creation never waits for an activated event or coldboot worker
+while holding the group or per-SoC core mutex.
+
+Initialize callback-visible state before registering QMI lookup. Ignore
+unsolicited memory requests until activation because their receive
+callback can also take the group mutex. On teardown, mark the service
+stopping, reject new event posts, cancel workers before releasing their
+QMI handle, and free retained event records after callbacks are quiesced.
+Use the same cleanup for failures after QMI handle initialization,
+including workqueue allocation or lookup registration failure.
+
+Normal firmware recovery keeps the existing active QMI service. A full
+service reinitialization clears the complete target-memory array and
+segment count before preparing a fresh deferred event queue, so a retry
+cannot reuse stale allocation metadata from an earlier service lifetime.
+Reset the radio-capability readiness sentinel for the new service too.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+--- a/drivers/net/wireless/ath/ath12k/core.c
++++ b/drivers/net/wireless/ath/ath12k/core.c
+@@ -857,8 +857,6 @@
+ 		goto err_qmi_deinit;
+ 	}
+ 
+-	ath12k_qmi_schedule_cold_boot(ab);
+-
+ 	return 0;
+ 
+ err_qmi_deinit:
+@@ -2197,6 +2195,16 @@
+ 		mutex_unlock(&ab->core_lock);
+ 	}
+ 
++	/* QMI handlers take the group/core locks. Keep them deferred until
++	 * every SoC has powered up, so rollback never cancels a worker that
++	 * is waiting for a lock held by this thread. Activation cannot fail.
++	 */
++	for (i = 0; i < ag->num_devices; i++) {
++		ab = ag->ab[i];
++		if (ab)
++			ath12k_qmi_start_service(ab);
++	}
++
+ 	return 0;
+ 
+ destroy:
+--- a/drivers/net/wireless/ath/ath12k/qmi.c
++++ b/drivers/net/wireless/ath/ath12k/qmi.c
+@@ -3922,10 +3922,16 @@
+ 	event->data = data;
+ 
+ 	spin_lock(&qmi->event_lock);
++	if (qmi->event_state == ATH12K_QMI_EVENT_STOPPING) {
++		spin_unlock(&qmi->event_lock);
++		kfree(event);
++		return -ESHUTDOWN;
++	}
++
+ 	list_add_tail(&event->list, &qmi->event_list);
++	if (qmi->event_state == ATH12K_QMI_EVENT_RUNNING)
++		queue_work(qmi->event_wq, &qmi->event_work);
+ 	spin_unlock(&qmi->event_lock);
+-
+-	queue_work(qmi->event_wq, &qmi->event_work);
+ 
+ 	return 0;
+ }
+@@ -4106,6 +4112,17 @@
+ 	struct ath12k_base *ab = qmi->ab;
+ 	const struct qmi_wlanfw_request_mem_ind_msg_v01 *msg = data;
+ 	int i, ret;
++
++	/* Indication registration is deferred with SERVER_ARRIVE. Do not let
++	 * unsolicited memory requests wait for the group lock before then,
++	 * or start allocating memory after service teardown has begun.
++	 */
++	spin_lock(&qmi->event_lock);
++	if (qmi->event_state != ATH12K_QMI_EVENT_RUNNING) {
++		spin_unlock(&qmi->event_lock);
++		return;
++	}
++	spin_unlock(&qmi->event_lock);
+ 
+ 	ath12k_dbg(ab, ATH12K_DBG_QMI, "qmi firmware request memory request\n");
+ 
+@@ -4307,7 +4324,8 @@
+ 	int ret;
+ 
+ 	spin_lock(&qmi->event_lock);
+-	while (!list_empty(&qmi->event_list)) {
++	while (qmi->event_state == ATH12K_QMI_EVENT_RUNNING &&
++	       !list_empty(&qmi->event_list)) {
+ 		event = list_first_entry(&qmi->event_list,
+ 					 struct ath12k_qmi_driver_event, list);
+ 		list_del(&event->list);
+@@ -4376,13 +4394,41 @@
+ 	spin_unlock(&qmi->event_lock);
+ }
+ 
++void ath12k_qmi_start_service(struct ath12k_base *ab)
++{
++	struct ath12k_qmi *qmi = &ab->qmi;
++
++	lockdep_assert_held(&ab->ag->mutex);
++
++	spin_lock(&qmi->event_lock);
++	if (qmi->event_state != ATH12K_QMI_EVENT_PREPARED) {
++		spin_unlock(&qmi->event_lock);
++		return;
++	}
++	qmi->event_state = ATH12K_QMI_EVENT_RUNNING;
++	queue_work(qmi->event_wq, &qmi->event_work);
++	spin_unlock(&qmi->event_lock);
++
++	ath12k_qmi_schedule_cold_boot(ab);
++}
++
+ int ath12k_qmi_init_service(struct ath12k_base *ab)
+ {
+ 	int ret;
+ 
+ 	memset(&ab->qmi.target, 0, sizeof(struct target_info));
+-	memset(&ab->qmi.target_mem, 0, sizeof(struct target_mem_chunk));
++	memset(ab->qmi.target_mem, 0, sizeof(ab->qmi.target_mem));
++	ab->qmi.mem_seg_count = 0;
++	ab->qmi.target_mem_delayed = false;
++	ab->qmi.num_radios = U8_MAX;
+ 	ab->qmi.ab = ab;
++	ab->qmi.event_wq = NULL;
++	INIT_LIST_HEAD(&ab->qmi.event_list);
++	spin_lock_init(&ab->qmi.event_lock);
++	ab->qmi.event_state = ATH12K_QMI_EVENT_PREPARED;
++	ab->qmi.block_event = false;
++	INIT_WORK(&ab->qmi.event_work, ath12k_qmi_driver_event_work);
++	INIT_WORK(&ab->qmi.cold_boot_work, ath12k_qmi_cold_boot_work);
+ 	spin_lock_init(&ab->qmi.cold_boot_lock);
+ 	init_completion(&ab->qmi.fw_ready_completion);
+ 	init_completion(&ab->qmi.cal_done_completion);
+@@ -4403,41 +4449,61 @@
+ 			      &ath12k_qmi_ops, ath12k_qmi_msg_handlers);
+ 	if (ret < 0) {
+ 		ath12k_warn(ab, "failed to initialize qmi handle\n");
++		ab->qmi.ab = NULL;
+ 		return ret;
+ 	}
+ 
+ 	ab->qmi.event_wq = alloc_ordered_workqueue("ath12k_qmi_driver_event", 0);
+ 	if (!ab->qmi.event_wq) {
+ 		ath12k_err(ab, "failed to allocate workqueue\n");
+-		return -EFAULT;
+-	}
+-
+-	INIT_LIST_HEAD(&ab->qmi.event_list);
+-	spin_lock_init(&ab->qmi.event_lock);
+-	INIT_WORK(&ab->qmi.event_work, ath12k_qmi_driver_event_work);
+-	INIT_WORK(&ab->qmi.cold_boot_work, ath12k_qmi_cold_boot_work);
++		ret = -EFAULT;
++		goto err_deinit;
++	}
+ 
+ 	ret = qmi_add_lookup(&ab->qmi.handle, QMI_SERVICE_ID_WLFW,
+ 			     ATH12K_QMI_WLFW_SERVICE_VERS_V01,
+ 			     ab->qmi.service_ins_id);
+ 	if (ret < 0) {
+ 		ath12k_warn(ab, "failed to add qmi lookup\n");
+-		destroy_workqueue(ab->qmi.event_wq);
+-		return ret;
++		goto err_deinit;
+ 	}
+ 
+ 	return ret;
++
++err_deinit:
++	ath12k_qmi_deinit_service(ab);
++	return ret;
+ }
+ 
+ void ath12k_qmi_deinit_service(struct ath12k_base *ab)
+ {
++	struct ath12k_qmi_driver_event *event, *tmp;
++	LIST_HEAD(events);
++
+ 	if (!ab->qmi.ab)
+ 		return;
+ 
++	spin_lock(&ab->qmi.event_lock);
++	ab->qmi.event_state = ATH12K_QMI_EVENT_STOPPING;
++	spin_unlock(&ab->qmi.event_lock);
++
+ 	ath12k_qmi_cancel_cold_boot(ab);
++	cancel_work_sync(&ab->qmi.event_work);
+ 	qmi_handle_release(&ab->qmi.handle);
+-	cancel_work_sync(&ab->qmi.event_work);
+-	destroy_workqueue(ab->qmi.event_wq);
++	if (ab->qmi.event_wq) {
++		destroy_workqueue(ab->qmi.event_wq);
++		ab->qmi.event_wq = NULL;
++	}
++
++	/* Prepared services can still have events queued when creation fails. */
++	spin_lock(&ab->qmi.event_lock);
++	list_splice_init(&ab->qmi.event_list, &events);
++	spin_unlock(&ab->qmi.event_lock);
++	list_for_each_entry_safe(event, tmp, &events, list) {
++		list_del(&event->list);
++		kfree(event);
++	}
++
+ 	ath12k_qmi_aux_uc_free(ab);
+ 	ath12k_qmi_m3_free(ab);
+ 	ath12k_qmi_free_target_mem_chunk(ab);
+--- a/drivers/net/wireless/ath/ath12k/qmi.h
++++ b/drivers/net/wireless/ath/ath12k/qmi.h
+@@ -148,6 +148,12 @@
+ 	ATH12K_QMI_COLD_BOOT_COMPLETE,
+ 	ATH12K_QMI_COLD_BOOT_FAILED,
+ 	ATH12K_QMI_COLD_BOOT_CANCELLED,
++};
++
++enum ath12k_qmi_event_state {
++	ATH12K_QMI_EVENT_PREPARED,
++	ATH12K_QMI_EVENT_RUNNING,
++	ATH12K_QMI_EVENT_STOPPING,
+ };
+ 
+ struct ath12k_qmi {
+@@ -181,6 +187,7 @@
+ 
+ 	/* protected with struct ath12k_qmi::event_lock */
+ 	bool block_event;
++	enum ath12k_qmi_event_state event_state;
+ 
+ 	u8 num_radios;
+ 	struct target_info target;
+@@ -675,6 +682,7 @@
+ void ath12k_qmi_firmware_stop(struct ath12k_base *ab);
+ void ath12k_qmi_deinit_service(struct ath12k_base *ab);
+ int ath12k_qmi_init_service(struct ath12k_base *ab);
++void ath12k_qmi_start_service(struct ath12k_base *ab);
+ void ath12k_qmi_free_resource(struct ath12k_base *ab);
+ void ath12k_qmi_trigger_host_cap(struct ath12k_base *ab);
+ bool ath12k_qmi_cold_boot_pending(struct ath12k_base *ab);
