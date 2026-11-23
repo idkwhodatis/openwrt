@@ -59,6 +59,7 @@ define Device/xiaomi_be18000
 	SUBPAGESIZE := 2048
 	VID_HDR_OFFSET := 2048
 	IMAGE_SIZE := 199229440
+	IMAGE/factory.ubi := append-ubi | check-size
 	DEVICE_PACKAGES := ath12k-firmware-qcn9274 ipq-wifi-xiaomi_be18000 \
 		kmod-ath12k kmod-qcom-ppe kmod-pcs-qcom-ipq9574 kmod-sfp \
 		kmod-hwmon-emc2305 kmod-hwmon-lm63 kmod-leds-pwm \
