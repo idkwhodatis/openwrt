@@ -1,0 +1,909 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 22 Nov 2026 12:00:00 +0000
+Subject: [PATCH] net: ethernet: qualcomm: ppe: track TX DMA ownership
+
+The scatter-gather mapping path adds a helper's zero failure result to a
+count already containing the head descriptor, so it can publish a partial
+MORE chain after DMA mapping fails. Its error paths also reconstruct DMA
+addresses from skb fragment metadata and unmap PAGE_SIZE instead of the
+mapped length. Completion skips intermediate descriptors and unmaps only
+one segment, leaking the other mappings even on successful transmission.
+
+Record every successful mapping's DMA address, length and mapping type in
+packet-owned storage. Keep the first mapping in skb->cb, with a build-time
+size check; allocate only the additional records needed by a scattered
+packet. This avoids a per-packet allocation for linear traffic and keeps
+metadata valid when a TX descriptor is reused before completion.
+
+Use one segment builder for skb heads, page fragments and direct frag-list
+children. Skip empty segments, set MORE only after the next mapping has
+succeeded, convert each descriptor to little endian once, and retain the
+root skb opaque on the final descriptor only. Linearize nested frag lists
+before counting or mapping so their payload is not silently omitted.
+Unwind the complete successful mapping prefix on any error without
+publishing a producer update or returning descriptor exhaustion. Reclaim
+all mappings through the same helper on completion and pending-packet
+teardown. Move packet statistics before producer publication so completion
+cannot free an skb while the transmit path still reads it.
+
+Skip hardware-index walks during allocation rollback until ring registers
+have been configured. During live teardown, only unconsumed final TX
+descriptors own packets; consumed final descriptors belong to their
+completion ring. Correct the per-port ring-disable loop, which otherwise
+overwrites the computed port index and disables port 1 for every port.
+The existing hardware shutdown ordering and delay are unchanged.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/drivers/net/ethernet/qualcomm/ppe/edma_cfg_tx.c b/drivers/net/ethernet/qualcomm/ppe/edma_cfg_tx.c
+index ae9f5dc..6de80ad 100644
+--- a/drivers/net/ethernet/qualcomm/ppe/edma_cfg_tx.c
++++ b/drivers/net/ethernet/qualcomm/ppe/edma_cfg_tx.c
+@@ -25,7 +25,8 @@ static void edma_cfg_txcmpl_ring_cleanup(struct edma_txcmpl_ring *txcmpl_ring)
+ 	struct device *dev =  ppe_dev->dev;
+ 
+ 	/* Free any buffers assigned to any descriptors. */
+-	edma_tx_complete(EDMA_TX_RING_SIZE - 1, txcmpl_ring);
++	if (txcmpl_ring->configured)
++		edma_tx_complete(EDMA_TX_RING_SIZE - 1, txcmpl_ring);
+ 
+ 	/* Free Tx cmpl ring descriptors. */
+ 	dma_free_coherent(dev, sizeof(struct edma_txcmpl_desc)
+@@ -33,6 +34,7 @@ static void edma_cfg_txcmpl_ring_cleanup(struct edma_txcmpl_ring *txcmpl_ring)
+ 			  txcmpl_ring->dma);
+ 	txcmpl_ring->desc = NULL;
+ 	txcmpl_ring->dma = (dma_addr_t)0;
++	txcmpl_ring->configured = false;
+ }
+ 
+ static int edma_cfg_txcmpl_ring_setup(struct edma_txcmpl_ring *txcmpl_ring)
+@@ -61,6 +63,10 @@ static void edma_cfg_tx_desc_ring_cleanup(struct edma_txdesc_ring *txdesc_ring)
+ 	u32 prod_idx, cons_idx, data, reg;
+ 	struct sk_buff *skb = NULL;
+ 
++	/* Allocation rollback has no packets or initialized hardware indices. */
++	if (!txdesc_ring->configured)
++		goto free_desc;
++
+ 	/* Free any buffers assigned to any descriptors. */
+ 	reg = EDMA_BASE_OFFSET + EDMA_REG_TXDESC_PROD_IDX(txdesc_ring->id);
+ 	regmap_read(regmap, reg, &data);
+@@ -70,15 +76,23 @@ static void edma_cfg_tx_desc_ring_cleanup(struct edma_txdesc_ring *txdesc_ring)
+ 	regmap_read(regmap, reg, &data);
+ 	cons_idx = data & EDMA_TXDESC_CONS_IDX_MASK;
+ 
+-	/* Walk active list, obtain skb from descriptor and free it. */
++	/* The caller has stopped the ports and disabled their TX rings.
++	 * An unconsumed final descriptor owns the packet; a consumed final
++	 * descriptor transfers ownership to the completion ring instead.
++	 */
+ 	while (cons_idx != prod_idx) {
+ 		txdesc = EDMA_TXDESC_PRI_DESC(txdesc_ring, cons_idx);
+-		skb = (struct sk_buff *)EDMA_TXDESC_OPAQUE_GET(txdesc);
+-		dev_kfree_skb_any(skb);
++		if (!(le32_to_cpu((__force __le32)txdesc->word1) &
++		      EDMA_TXDESC_MORE_BIT_MASK)) {
++			skb = (struct sk_buff *)EDMA_TXDESC_OPAQUE_GET(txdesc);
++			edma_tx_free_skb(skb);
++			EDMA_TXDESC_OPAQUE_SET(txdesc, NULL);
++		}
+ 
+ 		cons_idx = ((cons_idx + 1) & EDMA_TX_RING_SIZE_MASK);
+ 	}
+ 
++free_desc:
+ 	/* Free Tx ring descriptors. */
+ 	dma_free_coherent(dev, (sizeof(struct edma_txdesc_pri)
+ 			  * txdesc_ring->count),
+@@ -94,6 +108,7 @@ static void edma_cfg_tx_desc_ring_cleanup(struct edma_txdesc_ring *txdesc_ring)
+ 			  txdesc_ring->sdma);
+ 	txdesc_ring->sdesc = NULL;
+ 	txdesc_ring->sdma = (dma_addr_t)0;
++	txdesc_ring->configured = false;
+ }
+ 
+ static int edma_cfg_tx_desc_ring_setup(struct edma_txdesc_ring *txdesc_ring)
+@@ -150,6 +165,7 @@ static void edma_cfg_tx_desc_ring_configure(struct edma_txdesc_ring *txdesc_ring
+ 	/* Configure group ID for flow control for this Tx ring. */
+ 	reg = EDMA_BASE_OFFSET + EDMA_REG_TXDESC_CTRL(txdesc_ring->id);
+ 	regmap_write(regmap, reg, data);
++	txdesc_ring->configured = true;
+ }
+ 
+ static void edma_cfg_txcmpl_ring_configure(struct edma_txcmpl_ring *txcmpl_ring)
+@@ -205,6 +221,7 @@ static void edma_cfg_txcmpl_ring_configure(struct edma_txcmpl_ring *txcmpl_ring)
+ 
+ 	reg = EDMA_BASE_OFFSET + EDMA_REG_TX_INT_CTRL(txcmpl_ring->id);
+ 	regmap_write(regmap, reg, EDMA_TX_NE_INT_EN);
++	txcmpl_ring->configured = true;
+ }
+ 
+ /**
+@@ -272,10 +289,9 @@ void edma_cfg_tx_rings_disable(u32 port_id)
+ 		txdesc_ring = &edma_ctx->tx_rings[ring_idx];
+ 		u32 data;
+ 
+-		txdesc_ring = &edma_ctx->tx_rings[i];
+ 		reg = EDMA_BASE_OFFSET + EDMA_REG_TXDESC_CTRL(txdesc_ring->id);
+ 		regmap_read(regmap, reg, &data);
+-		data &= ~EDMA_TXDESC_TX_ENABLE;
++		data &= ~EDMA_TXDESC_CTRL_TXEN_MASK;
+ 		regmap_write(regmap, reg, data);
+ 	}
+ }
+diff --git a/drivers/net/ethernet/qualcomm/ppe/edma_tx.c b/drivers/net/ethernet/qualcomm/ppe/edma_tx.c
+index a7961f2..f86af92 100644
+--- a/drivers/net/ethernet/qualcomm/ppe/edma_tx.c
++++ b/drivers/net/ethernet/qualcomm/ppe/edma_tx.c
+@@ -11,6 +11,7 @@
+ #include <linux/netdevice.h>
+ #include <linux/platform_device.h>
+ #include <linux/printk.h>
++#include <linux/slab.h>
+ #include <net/gso.h>
+ #include <linux/regmap.h>
+ 
+@@ -20,33 +21,81 @@
+ #include "ppe.h"
+ #include "ppe_regs.h"
+ 
+-static u32 edma_tx_num_descs_for_sg(struct sk_buff *skb)
++struct edma_tx_dma_map {
++	dma_addr_t addr;
++	u32 len;
++	bool page;
++};
++
++/* Keep the first mapping inline so linear packets need no allocation. */
++struct edma_tx_skb_cb {
++	struct edma_tx_dma_map first;
++	struct edma_tx_dma_map *extra;
++	u32 num_maps;
++};
++
++static struct edma_tx_skb_cb *edma_tx_skb_cb(struct sk_buff *skb)
+ {
+-	u32 nr_frags_first = 0, num_tx_desc_needed = 0;
++	BUILD_BUG_ON(sizeof(struct edma_tx_skb_cb) > sizeof(skb->cb));
+ 
+-	/* Check if we have enough Tx descriptors for SG. */
+-	if (unlikely(skb_shinfo(skb)->nr_frags)) {
+-		nr_frags_first = skb_shinfo(skb)->nr_frags;
+-		WARN_ON_ONCE(nr_frags_first > MAX_SKB_FRAGS);
+-		num_tx_desc_needed += nr_frags_first;
++	return (struct edma_tx_skb_cb *)skb->cb;
++}
++
++static void edma_tx_unmap_skb(struct sk_buff *skb)
++{
++	struct device *dev = edma_ctx->ppe_dev->dev;
++	struct edma_tx_skb_cb *cb = edma_tx_skb_cb(skb);
++
++	while (cb->num_maps) {
++		struct edma_tx_dma_map *map;
++		u32 i = --cb->num_maps;
++
++		map = i ? &cb->extra[i - 1] : &cb->first;
++		if (map->page)
++			dma_unmap_page(dev, map->addr, map->len, DMA_TO_DEVICE);
++		else
++			dma_unmap_single(dev, map->addr, map->len, DMA_TO_DEVICE);
+ 	}
+ 
+-	/* Walk through fraglist skbs making a note of nr_frags
+-	 * One Tx desc for fraglist skb. Fraglist skb may have
+-	 * further nr_frags.
+-	 */
+-	if (unlikely(skb_has_frag_list(skb))) {
+-		struct sk_buff *iter_skb;
++	kfree(cb->extra);
++	cb->extra = NULL;
++}
+ 
+-		skb_walk_frags(skb, iter_skb) {
+-			u32 nr_frags = skb_shinfo(iter_skb)->nr_frags;
++/**
++ * edma_tx_free_skb - Release all DMA mappings and the transmitted skb.
++ * @skb: Packet owned by the final TX descriptor or its completion.
++ */
++void edma_tx_free_skb(struct sk_buff *skb)
++{
++	if (!skb)
++		return;
+ 
+-			WARN_ON_ONCE(nr_frags > MAX_SKB_FRAGS);
+-			num_tx_desc_needed += (1 + nr_frags);
+-		}
+-	}
++	edma_tx_unmap_skb(skb);
++	dev_kfree_skb_any(skb);
++}
++
++static u32 edma_tx_num_skb_descs(struct sk_buff *skb)
++{
++	u32 num_descs = !!skb_headlen(skb);
++	u32 nr_frags = skb_shinfo(skb)->nr_frags;
++	u32 i;
++
++	WARN_ON_ONCE(nr_frags > MAX_SKB_FRAGS);
++	for (i = 0; i < nr_frags; i++)
++		num_descs += !!skb_frag_size(&skb_shinfo(skb)->frags[i]);
++
++	return num_descs;
++}
++
++static u32 edma_tx_num_descs_for_sg(struct sk_buff *skb)
++{
++	struct sk_buff *iter_skb;
++	u32 num_descs = edma_tx_num_skb_descs(skb);
++
++	skb_walk_frags(skb, iter_skb)
++		num_descs += edma_tx_num_skb_descs(iter_skb);
+ 
+-	return (num_tx_desc_needed + 1);
++	return num_descs;
+ }
+ 
+ /**
+@@ -165,20 +214,6 @@ u32 edma_tx_complete(u32 work_to_do, struct edma_txcmpl_ring *txcmpl_ring)
+ 			u64_stats_update_end(&txcmpl_stats->syncp);
+ 		} else {
+ 
+-			/* Retrieve pool id for unmapping.
+-			 * 0 for linear skb and (pool id - 1) represents nr_frag index.
+-			 */
+-			if (!EDMA_TXCOMP_POOL_ID_GET(txcmpl)) {
+-				dma_unmap_single(dev, virt_to_phys(skb->data),
+-						 skb_headlen(skb), DMA_TO_DEVICE);
+-			} else {
+-				u8 frag_index = (EDMA_TXCOMP_POOL_ID_GET(txcmpl) - 1);
+-				skb_frag_t *frag = &skb_shinfo(skb)->frags[frag_index];
+-
+-				dma_unmap_page(dev, virt_to_phys(frag),
+-					       PAGE_SIZE, DMA_TO_DEVICE);
+-			}
+-
+ 			dev_dbg(dev, "TXCMPL: skb:%pK, skb->len %d, skb->data_len %d, cons_idx:%d prod_idx:%d word2:0x%x word3:0x%x\n",
+ 				skb, skb->len, skb->data_len, cons_idx, prod_idx,
+ 				txcmpl->word2, txcmpl->word3);
+@@ -194,7 +229,7 @@ u32 edma_tx_complete(u32 work_to_do, struct edma_txcmpl_ring *txcmpl_ring)
+ 				u64_stats_update_end(&txcmpl_stats->syncp);
+ 			}
+ 
+-			dev_kfree_skb(skb);
++			edma_tx_free_skb(skb);
+ 		}
+ 
+ 		cons_idx = ((cons_idx + 1) & EDMA_TX_RING_SIZE_MASK);
+@@ -293,99 +328,6 @@ irqreturn_t edma_tx_handle_irq(int irq, void *ctx)
+ 	return IRQ_HANDLED;
+ }
+ 
+-static void edma_tx_dma_unmap_frags(struct sk_buff *skb, u32 nr_frags)
+-{
+-	struct ppe_device *ppe_dev = edma_ctx->ppe_dev;
+-	struct device *dev = ppe_dev->dev;
+-	u32 buf_len = 0;
+-	u8 i = 0;
+-
+-	for (i = 0; i < skb_shinfo(skb)->nr_frags - nr_frags; i++) {
+-		skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
+-
+-		/* DMA mapping was not done for zero size segments. */
+-		buf_len = skb_frag_size(frag);
+-		if (unlikely(buf_len == 0))
+-			continue;
+-
+-		dma_unmap_page(dev, virt_to_phys(frag), PAGE_SIZE,
+-			       DMA_TO_DEVICE);
+-	}
+-}
+-
+-static u32 edma_tx_skb_nr_frags(struct edma_txdesc_ring *txdesc_ring,
+-				struct edma_txdesc_pri **txdesc, struct sk_buff *skb,
+-				u32 *hw_next_to_use, u32 *invalid_frag)
+-{
+-	u32 nr_frags = 0, buf_len = 0, num_descs = 0, start_idx = 0, end_idx = 0;
+-	struct ppe_device *ppe_dev = edma_ctx->ppe_dev;
+-	u32 start_hw_next_to_use = *hw_next_to_use;
+-	struct edma_txdesc_pri *txd = *txdesc;
+-	struct device *dev = ppe_dev->dev;
+-	u8 i = 0;
+-
+-	/* Hold onto the index mapped to *txdesc.
+-	 * This will be the index previous to that of current *hw_next_to_use.
+-	 */
+-	start_idx = (((*hw_next_to_use) + EDMA_TX_RING_SIZE_MASK)
+-		& EDMA_TX_RING_SIZE_MASK);
+-
+-	/* Handle if the skb has nr_frags. */
+-	nr_frags = skb_shinfo(skb)->nr_frags;
+-	num_descs = nr_frags;
+-	i = 0;
+-
+-	while (nr_frags--) {
+-		skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
+-		dma_addr_t buff_addr;
+-
+-		buf_len = skb_frag_size(frag);
+-
+-		/* Zero size segment can lead EDMA HW to hang so, we don't want to
+-		 * process them. Zero size segment can happen during TSO operation
+-		 * if there is nothing but header in the primary segment.
+-		 */
+-		if (unlikely(buf_len == 0)) {
+-			num_descs--;
+-			i++;
+-			continue;
+-		}
+-
+-		/* Setting the MORE bit on the previous Tx descriptor.
+-		 * Note: We will flush this descriptor as well later.
+-		 */
+-		EDMA_TXDESC_MORE_BIT_SET(txd, 1);
+-		EDMA_TXDESC_ENDIAN_SET(txd);
+-
+-		txd = EDMA_TXDESC_PRI_DESC(txdesc_ring, *hw_next_to_use);
+-		memset(txd, 0, sizeof(struct edma_txdesc_pri));
+-		buff_addr = skb_frag_dma_map(dev, frag, 0, buf_len,
+-					     DMA_TO_DEVICE);
+-		if (dma_mapping_error(dev, buff_addr)) {
+-			dev_dbg(dev, "Unable to dma first descriptor for nr_frags tx\n");
+-			*hw_next_to_use = start_hw_next_to_use;
+-			*invalid_frag = nr_frags;
+-			return 0;
+-		}
+-
+-		EDMA_TXDESC_BUFFER_ADDR_SET(txd, buff_addr);
+-		EDMA_TXDESC_DATA_LEN_SET(txd, buf_len);
+-		EDMA_TXDESC_POOL_ID_SET(txd, (i + 1));
+-
+-		*hw_next_to_use = ((*hw_next_to_use + 1) & EDMA_TX_RING_SIZE_MASK);
+-		i++;
+-	}
+-
+-	EDMA_TXDESC_ENDIAN_SET(txd);
+-
+-	/* This will be the index previous to that of current *hw_next_to_use. */
+-	end_idx = (((*hw_next_to_use) + EDMA_TX_RING_SIZE_MASK) & EDMA_TX_RING_SIZE_MASK);
+-
+-	*txdesc = txd;
+-
+-	return num_descs;
+-}
+-
+ static void edma_tx_fill_desc(struct edma_port_priv *port_priv,
+ 				 struct edma_txdesc_pri *txd, struct sk_buff *skb,
+ 	struct edma_port_tx_stats *stats)
+@@ -432,212 +374,80 @@ static void edma_tx_fill_desc(struct edma_port_priv *port_priv,
+ 	EDMA_DST_INFO_SET(txd, port_id);
+ }
+ 
+-static struct edma_txdesc_pri *edma_tx_skb_first_desc(struct edma_port_priv *port_priv,
+-						      struct edma_txdesc_ring *txdesc_ring,
+-						      struct sk_buff *skb, u32 *hw_next_to_use,
+-						      struct edma_port_tx_stats *stats)
+-{
+-	struct ppe_device *ppe_dev = edma_ctx->ppe_dev;
+-	struct edma_txdesc_pri *txd = NULL;
+-	struct device *dev = ppe_dev->dev;
+-	dma_addr_t buff_addr;
+-	u32 buf_len = 0;
+-
+-	/* Get the packet length. */
+-	buf_len = skb_headlen(skb);
+-	txd = EDMA_TXDESC_PRI_DESC(txdesc_ring, *hw_next_to_use);
+-	memset(txd, 0, sizeof(struct edma_txdesc_pri));
+-
+-	/* Set the data pointer as the buffer address in the descriptor. */
+-	buff_addr = dma_map_single(dev, skb->data, buf_len, DMA_TO_DEVICE);
+-	if (dma_mapping_error(dev, buff_addr)) {
+-		dev_dbg(dev, "Unable to dma first descriptor for tx\n");
+-		return NULL;
+-	}
+-
+-	EDMA_TXDESC_BUFFER_ADDR_SET(txd, buff_addr);
+-	EDMA_TXDESC_POOL_ID_SET(txd, 0);
+-	edma_tx_fill_desc(port_priv, txd, skb, stats);
+-
+-	/* Set packet length in the descriptor. */
+-	EDMA_TXDESC_DATA_LEN_SET(txd, buf_len);
+-	*hw_next_to_use = (*hw_next_to_use + 1) & EDMA_TX_RING_SIZE_MASK;
+-
+-	return txd;
+-}
++struct edma_tx_desc_builder {
++	struct edma_port_priv *port_priv;
++	struct edma_txdesc_ring *ring;
++	struct edma_port_tx_stats *stats;
++	struct sk_buff *skb;
++	struct edma_tx_skb_cb *cb;
++	struct edma_txdesc_pri *last;
++	u32 next;
++};
+ 
+-static void edma_tx_handle_dma_err(struct sk_buff *skb, u32 num_sg_frag_list)
++static void edma_tx_append_desc(struct edma_tx_desc_builder *builder,
++				dma_addr_t addr, u32 len, u32 pool_id)
+ {
+-	struct ppe_device *ppe_dev = edma_ctx->ppe_dev;
+-	struct device *dev = ppe_dev->dev;
+-	struct sk_buff *iter_skb = NULL;
+-	u32 cnt_sg_frag_list = 0;
+-
+-	/* Walk through all fraglist skbs. */
+-	skb_walk_frags(skb, iter_skb) {
+-		if (skb_headlen(iter_skb)) {
+-			dma_unmap_single(dev, virt_to_phys(iter_skb->data),
+-					 skb_headlen(iter_skb), DMA_TO_DEVICE);
+-			cnt_sg_frag_list += 1;
+-		}
+-
+-		if (cnt_sg_frag_list == num_sg_frag_list)
+-			return;
+-
+-		/* skb fraglist skb had nr_frags, unmap that memory. */
+-		u32 nr_frags = skb_shinfo(iter_skb)->nr_frags;
+-
+-		if (nr_frags == 0)
+-			continue;
+-
+-		for (int i = 0; i < nr_frags; i++) {
+-			skb_frag_t *frag = &skb_shinfo(iter_skb)->frags[i];
+-
+-			/* DMA mapping was not done for zero size segments. */
+-			if (unlikely(skb_frag_size(frag) == 0))
+-				continue;
+-
+-			dma_unmap_page(dev, virt_to_phys(frag),
+-				       PAGE_SIZE, DMA_TO_DEVICE);
+-			cnt_sg_frag_list += 1;
+-			if (cnt_sg_frag_list == num_sg_frag_list)
+-				return;
+-		}
++	struct edma_tx_skb_cb *cb = builder->cb;
++	struct edma_txdesc_pri *txd;
++	struct edma_tx_dma_map *map;
++
++	/* Record only successful mappings; the packet owns them until freed. */
++	map = cb->num_maps ? &cb->extra[cb->num_maps - 1] : &cb->first;
++	map->addr = addr;
++	map->len = len;
++	map->page = !!pool_id;
++	cb->num_maps++;
++
++	txd = EDMA_TXDESC_PRI_DESC(builder->ring, builder->next);
++	memset(txd, 0, sizeof(*txd));
++	EDMA_TXDESC_BUFFER_ADDR_SET(txd, addr);
++	EDMA_TXDESC_DATA_LEN_SET(txd, len);
++	EDMA_TXDESC_POOL_ID_SET(txd, pool_id);
++
++	if (builder->last) {
++		/* Do not publish a MORE chain until its successor has mapped. */
++		EDMA_TXDESC_MORE_BIT_SET(builder->last, 1);
++		EDMA_TXDESC_ENDIAN_SET(builder->last);
++	} else {
++		edma_tx_fill_desc(builder->port_priv, txd, builder->skb,
++				  builder->stats);
+ 	}
++
++	builder->last = txd;
++	builder->next = (builder->next + 1) & EDMA_TX_RING_SIZE_MASK;
+ }
+ 
+-static u32 edma_tx_skb_sg_fill_desc(struct edma_txdesc_ring *txdesc_ring,
+-				    struct edma_txdesc_pri **txdesc,
+-				    struct sk_buff *skb, u32 *hw_next_to_use,
+-				    struct edma_port_tx_stats *stats)
++static int edma_tx_map_skb(struct edma_tx_desc_builder *builder,
++			   struct sk_buff *skb)
+ {
+-	struct ppe_device *ppe_dev = edma_ctx->ppe_dev;
+-	u32 start_hw_next_to_use = 0, invalid_frag = 0;
+-	struct edma_txdesc_pri *txd = *txdesc;
+-	struct device *dev = ppe_dev->dev;
+-	struct sk_buff *iter_skb = NULL;
+-	u32 buf_len = 0, num_descs = 0;
+-	u32 num_sg_frag_list = 0;
+-
+-	/* Head skb processed already. */
+-	num_descs++;
+-
+-	/* Process skb with nr_frags. */
+-	if (unlikely(skb_shinfo(skb)->nr_frags)) {
+-		num_descs += edma_tx_skb_nr_frags(txdesc_ring, &txd, skb,
+-						  hw_next_to_use, &invalid_frag);
+-		if (unlikely(!num_descs)) {
+-			dev_dbg(dev, "No descriptor available for ring %d\n", txdesc_ring->id);
+-			edma_tx_dma_unmap_frags(skb, invalid_frag);
+-			*txdesc = NULL;
+-			return num_descs;
+-		}
+-
+-		u64_stats_update_begin(&stats->syncp);
+-		stats->tx_nr_frag_pkts++;
+-		u64_stats_update_end(&stats->syncp);
++	struct device *dev = edma_ctx->ppe_dev->dev;
++	u32 len = skb_headlen(skb);
++	dma_addr_t addr;
++	u32 i;
++
++	/* Empty heads and fragments must not produce zero-length descriptors. */
++	if (len) {
++		addr = dma_map_single(dev, skb->data, len, DMA_TO_DEVICE);
++		if (dma_mapping_error(dev, addr))
++			return -ENOMEM;
++
++		edma_tx_append_desc(builder, addr, len, 0);
+ 	}
+ 
+-	/* Process skb if it has frag_list */
+-	if (unlikely(skb_has_frag_list(skb))) {
+-		struct edma_txdesc_pri *start_desc = NULL;
+-		u32 start_idx = 0, end_idx = 0;
+-
+-		/* Hold onto the index mapped to txd.
+-		 * This will be the index previous to that of current *hw_next_to_use.
+-		 */
+-		start_idx = (((*hw_next_to_use) + EDMA_TX_RING_SIZE_MASK)
+-			     & EDMA_TX_RING_SIZE_MASK);
+-		start_desc = txd;
+-		start_hw_next_to_use = *hw_next_to_use;
+-
+-		/* Walk through all fraglist skbs. */
+-		skb_walk_frags(skb, iter_skb) {
+-			dma_addr_t buff_addr;
+-			u32 num_nr_frag = 0;
+-
+-			/* This case could happen during the packet decapsulation.
+-			 * All header content might be removed.
+-			 */
+-			buf_len = skb_headlen(iter_skb);
+-			if (unlikely(buf_len == 0))
+-				goto skip_primary;
+-
+-			/* We make sure to flush this descriptor later. */
+-			EDMA_TXDESC_MORE_BIT_SET(txd, 1);
+-			EDMA_TXDESC_ENDIAN_SET(txd);
+-
+-			txd = EDMA_TXDESC_PRI_DESC(txdesc_ring, *hw_next_to_use);
+-			memset(txd, 0, sizeof(struct edma_txdesc_pri));
+-			buff_addr = dma_map_single(dev, iter_skb->data,
+-						   buf_len, DMA_TO_DEVICE);
+-			if (dma_mapping_error(dev, buff_addr)) {
+-				dev_dbg(dev, "Unable to dma for fraglist\n");
+-				goto dma_err;
+-			}
+-
+-			EDMA_TXDESC_BUFFER_ADDR_SET(txd, buff_addr);
+-			EDMA_TXDESC_DATA_LEN_SET(txd, buf_len);
+-			EDMA_TXDESC_POOL_ID_SET(txd, 0);
+-
+-			*hw_next_to_use = (*hw_next_to_use + 1) & EDMA_TX_RING_SIZE_MASK;
+-			num_descs += 1;
+-			num_sg_frag_list += 1;
+-
+-			/* skb fraglist skb can have nr_frags. */
+-skip_primary:
+-			if (unlikely(skb_shinfo(iter_skb)->nr_frags)) {
+-				num_nr_frag = edma_tx_skb_nr_frags(txdesc_ring, &txd,
+-								   iter_skb, hw_next_to_use,
+-								   &invalid_frag);
+-				if (unlikely(!num_nr_frag)) {
+-					dev_dbg(dev, "No descriptor available for ring %d\n",
+-						txdesc_ring->id);
+-					edma_tx_dma_unmap_frags(iter_skb, invalid_frag);
+-					goto dma_err;
+-				}
+-
+-				num_descs += num_nr_frag;
+-				num_sg_frag_list += num_nr_frag;
+-
+-				/* Update fraglist with nr_frag stats. */
+-				u64_stats_update_begin(&stats->syncp);
+-				stats->tx_fraglist_with_nr_frags_pkts++;
+-				u64_stats_update_end(&stats->syncp);
+-			}
+-		}
++	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
++		skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
+ 
+-		EDMA_TXDESC_ENDIAN_SET(txd);
++		len = skb_frag_size(frag);
++		if (!len)
++			continue;
+ 
+-		/* This will be the index previous to
+-		 * that of current *hw_next_to_use.
+-		 */
+-		end_idx = (((*hw_next_to_use) + EDMA_TX_RING_SIZE_MASK) &
+-			   EDMA_TX_RING_SIZE_MASK);
++		addr = skb_frag_dma_map(dev, frag, 0, len, DMA_TO_DEVICE);
++		if (dma_mapping_error(dev, addr))
++			return -ENOMEM;
+ 
+-		/* Update frag_list stats. */
+-		u64_stats_update_begin(&stats->syncp);
+-		stats->tx_fraglist_pkts++;
+-		u64_stats_update_end(&stats->syncp);
++		edma_tx_append_desc(builder, addr, len, i + 1);
+ 	}
+ 
+-	dev_dbg(dev, "skb:%pK num_descs_filled: %u, nr_frags %u, frag_list fragments %u\n",
+-		skb, num_descs, skb_shinfo(skb)->nr_frags, num_sg_frag_list);
+-
+-	*txdesc = txd;
+-
+-	return num_descs;
+-
+-dma_err:
+-	if (!num_sg_frag_list)
+-		goto reset_state;
+-
+-	edma_tx_handle_dma_err(skb, num_sg_frag_list);
+-
+-reset_state:
+-	*hw_next_to_use = start_hw_next_to_use;
+-	*txdesc = NULL;
+-
+ 	return 0;
+ }
+ 
+@@ -669,133 +479,117 @@ static u32 edma_tx_avail_desc(struct edma_txdesc_ring *txdesc_ring,
+  * Check for available descriptors, fill the descriptors
+  * and transmit both linear and non linear packets.
+  *
+- * Return 0 on success, negative error code on failure.
++ * Return: EDMA_TX_OK on success, EDMA_TX_FAIL_NO_DESC for a full ring,
++ * or EDMA_TX_FAIL for a packet that the caller must drop.
+  */
+ enum edma_tx_status edma_tx_ring_xmit(struct net_device *netdev,
+-				      struct sk_buff *skb, struct edma_txdesc_ring *txdesc_ring,
+-				struct edma_port_tx_stats *stats)
++				    struct sk_buff *skb,
++				    struct edma_txdesc_ring *txdesc_ring,
++				    struct edma_port_tx_stats *stats)
+ {
+ 	struct edma_txdesc_stats *txdesc_stats = &txdesc_ring->txdesc_stats;
+ 	struct edma_port_priv *port_priv = netdev_priv(netdev);
+-	u32 num_tx_desc_needed = 0, num_desc_filled = 0;
+ 	struct ppe_device *ppe_dev = edma_ctx->ppe_dev;
+-	struct ppe_port *port = port_priv->ppe_port;
+ 	struct regmap *regmap = ppe_dev->regmap;
+-	struct edma_txdesc_pri *txdesc = NULL;
+-	struct device *dev = ppe_dev->dev;
+-	int port_id = port->port_id;
+-	u32 hw_next_to_use = 0;
++	struct edma_tx_skb_cb *cb = edma_tx_skb_cb(skb);
++	struct edma_tx_desc_builder builder = {
++		.port_priv = port_priv,
++		.ring = txdesc_ring,
++		.stats = stats,
++		.skb = skb,
++		.cb = cb,
++		.next = txdesc_ring->prod_idx,
++	};
++	u32 num_tx_desc_needed;
++	u32 fraglist_with_nr_frags = 0;
++	struct sk_buff *iter_skb;
+ 	u32 reg;
++	int ret;
+ 
+-	hw_next_to_use = txdesc_ring->prod_idx;
+-
+-	if (unlikely(!(txdesc_ring->avail_desc)))  {
+-		txdesc_ring->avail_desc = edma_tx_avail_desc(txdesc_ring,
+-							     hw_next_to_use);
+-		if (unlikely(!txdesc_ring->avail_desc)) {
+-			netdev_dbg(netdev, "No available descriptors are present at %d ring\n",
+-				   txdesc_ring->id);
+-
+-			u64_stats_update_begin(&txdesc_stats->syncp);
+-			++txdesc_stats->no_desc_avail;
+-			u64_stats_update_end(&txdesc_stats->syncp);
+-			return EDMA_TX_FAIL_NO_DESC;
++	/* The descriptor walker handles one frag-list level. Flatten deeper lists. */
++	skb_walk_frags(skb, iter_skb) {
++		if (skb_has_frag_list(iter_skb)) {
++			if (skb_linearize(skb))
++				return EDMA_TX_FAIL;
++			break;
+ 		}
+ 	}
+ 
+-	/* Process head skb for linear skb.
+-	 * Process head skb + nr_frags + fraglist for non linear skb.
+-	 */
+-	if (likely(!skb_is_nonlinear(skb))) {
+-		txdesc = edma_tx_skb_first_desc(port_priv, txdesc_ring, skb,
+-						&hw_next_to_use, stats);
+-		if (unlikely(!txdesc)) {
+-			netdev_dbg(netdev, "Failed to map linear skb for ring %d\n",
+-				   txdesc_ring->id);
+-			return EDMA_TX_FAIL;
+-		}
+-
+-		EDMA_TXDESC_ENDIAN_SET(txdesc);
+-		num_desc_filled++;
+-	} else {
+-		num_tx_desc_needed = edma_tx_num_descs_for_sg(skb);
+-
+-		/* HW does not support TSO for packets with more than 32 segments.
+-		 * HW hangs up if it sees more than 32 segments. Kernel Perform GSO
+-		 * for such packets with netdev gso_max_segs set to 32.
+-		 */
+-		if (unlikely(num_tx_desc_needed > EDMA_TX_TSO_SEG_MAX)) {
+-			netdev_dbg(netdev, "Number of segments %u more than %u for %d ring\n",
+-				   num_tx_desc_needed, EDMA_TX_TSO_SEG_MAX, txdesc_ring->id);
+-			u64_stats_update_begin(&txdesc_stats->syncp);
+-			++txdesc_stats->tso_max_seg_exceed;
+-			u64_stats_update_end(&txdesc_stats->syncp);
++	num_tx_desc_needed = edma_tx_num_descs_for_sg(skb);
++	if (unlikely(!num_tx_desc_needed))
++		return EDMA_TX_FAIL;
+ 
+-			u64_stats_update_begin(&stats->syncp);
+-			stats->tx_tso_drop_pkts++;
+-			u64_stats_update_end(&stats->syncp);
++	if (unlikely(num_tx_desc_needed > EDMA_TX_TSO_SEG_MAX)) {
++		netdev_dbg(netdev, "Number of segments %u exceeds %u for ring %u\n",
++			   num_tx_desc_needed, EDMA_TX_TSO_SEG_MAX, txdesc_ring->id);
++		u64_stats_update_begin(&txdesc_stats->syncp);
++		txdesc_stats->tso_max_seg_exceed++;
++		u64_stats_update_end(&txdesc_stats->syncp);
+ 
+-			return EDMA_TX_FAIL;
+-		}
++		u64_stats_update_begin(&stats->syncp);
++		stats->tx_tso_drop_pkts++;
++		u64_stats_update_end(&stats->syncp);
++		return EDMA_TX_FAIL;
++	}
+ 
++	if (unlikely(num_tx_desc_needed > txdesc_ring->avail_desc)) {
++		txdesc_ring->avail_desc = edma_tx_avail_desc(txdesc_ring, builder.next);
+ 		if (unlikely(num_tx_desc_needed > txdesc_ring->avail_desc)) {
+-			txdesc_ring->avail_desc = edma_tx_avail_desc(txdesc_ring,
+-								     hw_next_to_use);
+-			if (num_tx_desc_needed > txdesc_ring->avail_desc) {
+-				u64_stats_update_begin(&txdesc_stats->syncp);
+-				++txdesc_stats->no_desc_avail;
+-				u64_stats_update_end(&txdesc_stats->syncp);
+-				netdev_dbg(netdev, "Not enough available descriptors are present at %d ring for SG packet. Needed %d, currently available %d\n",
+-					   txdesc_ring->id, num_tx_desc_needed,
+-					   txdesc_ring->avail_desc);
+-				return EDMA_TX_FAIL_NO_DESC;
+-			}
+-		}
+-
+-		txdesc = edma_tx_skb_first_desc(port_priv, txdesc_ring, skb,
+-						&hw_next_to_use, stats);
+-		if (unlikely(!txdesc)) {
+-			netdev_dbg(netdev, "Failed to map non-linear skb head for ring %d\n",
+-				   txdesc_ring->id);
+-			return EDMA_TX_FAIL;
+-		}
+-
+-		num_desc_filled = edma_tx_skb_sg_fill_desc(txdesc_ring,
+-							   &txdesc, skb, &hw_next_to_use, stats);
+-		if (unlikely(!txdesc)) {
+-			netdev_dbg(netdev, "No descriptor available for ring %d\n",
+-				   txdesc_ring->id);
+-			dma_unmap_single(dev, virt_to_phys(skb->data),
+-					 skb_headlen(skb), DMA_TO_DEVICE);
+ 			u64_stats_update_begin(&txdesc_stats->syncp);
+-			++txdesc_stats->no_desc_avail;
++			txdesc_stats->no_desc_avail++;
+ 			u64_stats_update_end(&txdesc_stats->syncp);
+ 			return EDMA_TX_FAIL_NO_DESC;
+ 		}
+ 	}
+ 
+-	/* Set the skb pointer to the descriptor's opaque field/s
+-	 * on the last descriptor of the packet/SG packet.
+-	 */
+-	EDMA_TXDESC_OPAQUE_SET(txdesc, skb);
++	/* No BUSY return is possible after taking ownership of skb->cb. */
++	memset(cb, 0, sizeof(*cb));
++	if (num_tx_desc_needed > 1) {
++		cb->extra = kmalloc_array(num_tx_desc_needed - 1,
++					  sizeof(*cb->extra), GFP_ATOMIC);
++		if (!cb->extra)
++			return EDMA_TX_FAIL;
++	}
+ 
+-	/* Update producer index. */
+-	txdesc_ring->prod_idx = hw_next_to_use & EDMA_TXDESC_PROD_IDX_MASK;
+-	txdesc_ring->avail_desc -= num_desc_filled;
++	ret = edma_tx_map_skb(&builder, skb);
++	if (ret)
++		goto dma_err;
+ 
+-	netdev_dbg(netdev, "%s: skb:%pK tx_ring:%u proto:0x%x skb->len:%d\n port:%u prod_idx:%u ip_summed:0x%x\n",
+-		   netdev->name, skb, txdesc_ring->id, ntohs(skb->protocol),
+-		 skb->len, port_id, hw_next_to_use, skb->ip_summed);
++	skb_walk_frags(skb, iter_skb) {
++		ret = edma_tx_map_skb(&builder, iter_skb);
++		if (ret)
++			goto dma_err;
+ 
+-	dsb(st);
++		fraglist_with_nr_frags += !!skb_shinfo(iter_skb)->nr_frags;
++	}
+ 
+-	reg = EDMA_BASE_OFFSET + EDMA_REG_TXDESC_PROD_IDX(txdesc_ring->id);
+-	regmap_write(regmap, reg, txdesc_ring->prod_idx);
++	/* Only the final descriptor owns the skb and all of its DMA mappings. */
++	EDMA_TXDESC_ENDIAN_SET(builder.last);
++	EDMA_TXDESC_OPAQUE_SET(builder.last, skb);
++
++	txdesc_ring->prod_idx = builder.next & EDMA_TXDESC_PROD_IDX_MASK;
++	txdesc_ring->avail_desc -= cb->num_maps;
+ 
++	netdev_dbg(netdev, "skb:%pK tx_ring:%u len:%u descriptors:%u prod_idx:%u\n",
++		   skb, txdesc_ring->id, skb->len, cb->num_maps, builder.next);
++
++	/* Completion may free the skb as soon as the producer is published. */
+ 	u64_stats_update_begin(&stats->syncp);
+ 	stats->tx_pkts++;
+ 	stats->tx_bytes += skb->len;
++	stats->tx_nr_frag_pkts += !!skb_shinfo(skb)->nr_frags;
++	stats->tx_fraglist_pkts += skb_has_frag_list(skb);
++	stats->tx_fraglist_with_nr_frags_pkts += fraglist_with_nr_frags;
+ 	u64_stats_update_end(&stats->syncp);
+ 
++	dsb(st);
++	reg = EDMA_BASE_OFFSET + EDMA_REG_TXDESC_PROD_IDX(txdesc_ring->id);
++	regmap_write(regmap, reg, txdesc_ring->prod_idx);
++
+ 	return EDMA_TX_OK;
++
++dma_err:
++	netdev_dbg(netdev, "Failed to map skb for ring %u\n", txdesc_ring->id);
++	edma_tx_unmap_skb(skb);
++	return EDMA_TX_FAIL;
+ }
+diff --git a/drivers/net/ethernet/qualcomm/ppe/edma_tx.h b/drivers/net/ethernet/qualcomm/ppe/edma_tx.h
+index 0cf8a0b..e14426b 100644
+--- a/drivers/net/ethernet/qualcomm/ppe/edma_tx.h
++++ b/drivers/net/ethernet/qualcomm/ppe/edma_tx.h
+@@ -250,6 +250,7 @@ struct edma_txcmpl_desc {
+  * @sdma: Secondary descriptor ring physical address
+  * @count: Number of descriptors
+  * @fc_grp_id: Flow control group ID
++ * @configured: Ring registers have been initialized
+  */
+ struct edma_txdesc_ring {
+ 	u32 prod_idx;
+@@ -262,6 +263,7 @@ struct edma_txdesc_ring {
+ 	dma_addr_t sdma;
+ 	u32 count;
+ 	u8 fc_grp_id;
++	bool configured;
+ };
+ 
+ /**
+@@ -276,6 +278,7 @@ struct edma_txdesc_ring {
+  * @count: Number of descriptors in the ring
+  * @tx_queue: Netdevice transmit queue associated with this completion ring
+  * @napi_added: Flag to indicate NAPI add status
++ * @configured: Ring registers have been initialized
+  */
+ struct edma_txcmpl_ring {
+ 	struct napi_struct napi;
+@@ -288,12 +291,14 @@ struct edma_txcmpl_ring {
+ 	u32 count;
+ 	u16 tx_queue;
+ 	bool napi_added;
++	bool configured;
+ };
+ 
+ extern int edma_tx_napi_budget;
+ extern int edma_tx_mitigation_timer;
+ extern int edma_tx_mitigation_pkt_cnt;
+ 
++void edma_tx_free_skb(struct sk_buff *skb);
+ enum edma_tx_status edma_tx_ring_xmit(struct net_device *netdev,
+ 				      struct sk_buff *skb,
+ 			       struct edma_txdesc_ring *txdesc_ring,

@@ -1,0 +1,152 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 22 Nov 2026 12:00:00 +0000
+Subject: [PATCH] net: ethernet: qualcomm: ppe: fix TX cleanup and queue wakeup
+
+Each port maps one TX descriptor and completion ring to each netdevice TX
+queue. The completion interrupt can run on a different CPU from that
+queue, so using smp_processor_id() to choose the queue can leave the queue
+that ran out of descriptors stopped indefinitely.
+
+Record the queue index when the completion ring's NAPI instance is added
+and wake that queue regardless of interrupt affinity. Take its TX lock
+before checking whether it is stopped, so a concurrent ndo_start_xmit()
+cannot stop it after the last completion has skipped the wakeup. The
+transmit path already rereads the hardware consumer before reporting a
+full ring. Skip queue access after NAPI deletion, since ring cleanup can
+reap completions after the associated netdevice has been freed.
+
+Treat a failed DMA mapping of the linear skb or the non-linear skb head
+as a transmit failure, rather than descriptor exhaustion. No descriptor
+was submitted, so stopping the queue could leave it waiting for a
+completion that will never arrive. Do not count these mapping failures as
+descriptor exhaustion; the caller accounts for the dropped packet.
+
+Bound both TX descriptor and completion allocation unwind loops before
+decrementing their unsigned index. As with the RX rings, a failed setup
+helper already releases the partial current ring; only earlier rings
+need cleanup.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/drivers/net/ethernet/qualcomm/ppe/edma_cfg_tx.c b/drivers/net/ethernet/qualcomm/ppe/edma_cfg_tx.c
+index 1018f42..ae9f5dc 100644
+--- a/drivers/net/ethernet/qualcomm/ppe/edma_cfg_tx.c
++++ b/drivers/net/ethernet/qualcomm/ppe/edma_cfg_tx.c
+@@ -400,8 +400,10 @@ static int edma_cfg_tx_rings_setup(void)
+ 		if (ret) {
+ 			pr_err("Error in setting up %d txdesc ring. ret: %d",
+ 			       txdesc_ring->id, ret);
+-			while (i-- >= 0)
++			while (i) {
++				i--;
+ 				edma_cfg_tx_desc_ring_cleanup(&edma_ctx->tx_rings[i]);
++			}
+ 
+ 			return -ENOMEM;
+ 		}
+@@ -420,8 +422,10 @@ static int edma_cfg_tx_rings_setup(void)
+ 		if (ret != 0) {
+ 			pr_err("Error in setting up %d Tx cmpl ring. ret: %d",
+ 			       txcmpl_ring->id, ret);
+-			while (i-- >= 0)
++			while (i) {
++				i--;
+ 				edma_cfg_txcmpl_ring_cleanup(&edma_ctx->txcmpl_rings[i]);
++			}
+ 
+ 			goto txcmpl_mem_alloc_fail;
+ 		}
+@@ -662,6 +666,7 @@ void edma_cfg_tx_napi_add(struct net_device *netdev, u32 port_id)
+ 	for_each_possible_cpu(i) {
+ 		ring_idx = ((port_id - 1) * num_possible_cpus()) + i;
+ 		txcmpl_ring = &edma_ctx->txcmpl_rings[ring_idx];
++		txcmpl_ring->tx_queue = i;
+ 		netif_napi_add_weight(netdev, &txcmpl_ring->napi,
+ 				      edma_tx_napi_poll, hw_info->napi_budget_tx);
+ 		txcmpl_ring->napi_added = true;
+diff --git a/drivers/net/ethernet/qualcomm/ppe/edma_tx.c b/drivers/net/ethernet/qualcomm/ppe/edma_tx.c
+index f98bcbb..a7961f2 100644
+--- a/drivers/net/ethernet/qualcomm/ppe/edma_tx.c
++++ b/drivers/net/ethernet/qualcomm/ppe/edma_tx.c
+@@ -209,21 +209,22 @@ u32 edma_tx_complete(u32 work_to_do, struct edma_txcmpl_ring *txcmpl_ring)
+ 	reg = EDMA_BASE_OFFSET + EDMA_REG_TXCMPL_CONS_IDX(txcmpl_ring->id);
+ 	regmap_write(regmap, reg, cons_idx);
+ 
+-	/* If tx_requeue_stop disabled (tx_requeue_stop = 0)
+-	 * Fetch the tx queue of interface and check if it is stopped.
+-	 * if queue is stopped and interface is up, wake up this queue.
++	/* Ring cleanup can run after the associated netdevice has been freed.
++	 * Only wake a queue while its NAPI instance is still registered.
+ 	 */
+-	if (unlikely(!edma_ctx->tx_requeue_stop)) {
++	if (unlikely(!edma_ctx->tx_requeue_stop) && txcmpl_ring->napi_added) {
+ 		cpu_id = smp_processor_id();
+-		nq = netdev_get_tx_queue(txcmpl_ring->napi.dev, cpu_id);
++		nq = netdev_get_tx_queue(txcmpl_ring->napi.dev, txcmpl_ring->tx_queue);
++
++		/* Serialize the stopped check with ndo_start_xmit's stop_queue. */
++		__netif_tx_lock(nq, cpu_id);
+ 		if (unlikely(netif_tx_queue_stopped(nq)) &&
+ 		    netif_carrier_ok(txcmpl_ring->napi.dev)) {
+ 			dev_dbg(dev, "Waking queue number %d, for interface %s\n",
+-				cpu_id, txcmpl_ring->napi.dev->name);
+-			__netif_tx_lock(nq, cpu_id);
++				txcmpl_ring->tx_queue, txcmpl_ring->napi.dev->name);
+ 			netif_tx_wake_queue(nq);
+-			__netif_tx_unlock(nq);
+ 		}
++		__netif_tx_unlock(nq);
+ 	}
+ 
+ 	return count;
+@@ -709,12 +710,9 @@ enum edma_tx_status edma_tx_ring_xmit(struct net_device *netdev,
+ 		txdesc = edma_tx_skb_first_desc(port_priv, txdesc_ring, skb,
+ 						&hw_next_to_use, stats);
+ 		if (unlikely(!txdesc)) {
+-			netdev_dbg(netdev, "No descriptor available for ring %d\n",
++			netdev_dbg(netdev, "Failed to map linear skb for ring %d\n",
+ 				   txdesc_ring->id);
+-			u64_stats_update_begin(&txdesc_stats->syncp);
+-			++txdesc_stats->no_desc_avail;
+-			u64_stats_update_end(&txdesc_stats->syncp);
+-			return EDMA_TX_FAIL_NO_DESC;
++			return EDMA_TX_FAIL;
+ 		}
+ 
+ 		EDMA_TXDESC_ENDIAN_SET(txdesc);
+@@ -757,12 +755,9 @@ enum edma_tx_status edma_tx_ring_xmit(struct net_device *netdev,
+ 		txdesc = edma_tx_skb_first_desc(port_priv, txdesc_ring, skb,
+ 						&hw_next_to_use, stats);
+ 		if (unlikely(!txdesc)) {
+-			netdev_dbg(netdev, "No non-linear descriptor available for ring %d\n",
++			netdev_dbg(netdev, "Failed to map non-linear skb head for ring %d\n",
+ 				   txdesc_ring->id);
+-			u64_stats_update_begin(&txdesc_stats->syncp);
+-			++txdesc_stats->no_desc_avail;
+-			u64_stats_update_end(&txdesc_stats->syncp);
+-			return EDMA_TX_FAIL_NO_DESC;
++			return EDMA_TX_FAIL;
+ 		}
+ 
+ 		num_desc_filled = edma_tx_skb_sg_fill_desc(txdesc_ring,
+diff --git a/drivers/net/ethernet/qualcomm/ppe/edma_tx.h b/drivers/net/ethernet/qualcomm/ppe/edma_tx.h
+index a71c641..0cf8a0b 100644
+--- a/drivers/net/ethernet/qualcomm/ppe/edma_tx.h
++++ b/drivers/net/ethernet/qualcomm/ppe/edma_tx.h
+@@ -274,6 +274,7 @@ struct edma_txdesc_ring {
+  * @tx_cmpl_stats: Tx complete ring statistics
+  * @dma: Descriptor ring physical address
+  * @count: Number of descriptors in the ring
++ * @tx_queue: Netdevice transmit queue associated with this completion ring
+  * @napi_added: Flag to indicate NAPI add status
+  */
+ struct edma_txcmpl_ring {
+@@ -285,6 +286,7 @@ struct edma_txcmpl_ring {
+ 	struct edma_txcmpl_stats txcmpl_stats;
+ 	dma_addr_t dma;
+ 	u32 count;
++	u16 tx_queue;
+ 	bool napi_added;
+ };
+ 

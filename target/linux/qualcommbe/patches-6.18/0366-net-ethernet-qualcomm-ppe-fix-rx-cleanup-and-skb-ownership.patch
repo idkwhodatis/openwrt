@@ -1,0 +1,141 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 22 Nov 2026 12:00:00 +0000
+Subject: [PATCH] net: ethernet: qualcomm: ppe: fix RX cleanup and skb ownership
+
+The RX allocation failure loops pre-decrement an unsigned ring index and
+compare it against zero, so even a failure on the first ring walks beyond
+the array. Stop the unwind at zero and release only earlier allocations.
+The allocation helpers already release any partially allocated current
+ring.
+
+Advance the cached skb together with the next RX descriptor before any
+packet processing. Otherwise an invalid source drops the current skb but
+leaves it cached for the next descriptor, causing use after free and a
+possible second free.
+
+Keep ownership of a rejected linear skb in edma_rx_reap(): the page-mode
+header-pull failure must not free the skb before returning false to that
+caller. For fragmented packets, record checksum status on the packet head
+passed to the stack. The last page-fragment skb has already transferred
+its page to the head and been freed, and a frag-list child is not the
+packet whose checksum status the stack consumes.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/drivers/net/ethernet/qualcomm/ppe/edma_cfg_rx.c b/drivers/net/ethernet/qualcomm/ppe/edma_cfg_rx.c
+index 05e43d8..02c8215 100644
+--- a/drivers/net/ethernet/qualcomm/ppe/edma_cfg_rx.c
++++ b/drivers/net/ethernet/qualcomm/ppe/edma_cfg_rx.c
+@@ -607,8 +607,10 @@ static int edma_cfg_rx_rings_setup(void)
+ 		if (ret) {
+ 			pr_err("Error in setting up %d rxfill ring. ret: %d",
+ 			       rxfill_ring->ring_id, ret);
+-			while (--ring_idx >= 0)
++			while (ring_idx) {
++				ring_idx--;
+ 				edma_cfg_rx_fill_ring_cleanup(&edma_ctx->rxfill_rings[ring_idx]);
++			}
+ 
+ 			return -ENOMEM;
+ 		}
+@@ -626,8 +628,10 @@ static int edma_cfg_rx_rings_setup(void)
+ 
+ 		if (queue_id > EDMA_CPU_PORT_QUEUE_MAX(EDMA_RX_QUEUE_START)) {
+ 			pr_err("Invalid queue_id: %d\n", queue_id);
+-			while (--ring_idx >= 0)
++			while (ring_idx) {
++				ring_idx--;
+ 				edma_cfg_rx_desc_ring_cleanup(&edma_ctx->rx_rings[ring_idx]);
++			}
+ 
+ 			goto rxdesc_mem_alloc_fail;
+ 		}
+@@ -645,8 +649,10 @@ static int edma_cfg_rx_rings_setup(void)
+ 		if (ret) {
+ 			pr_err("Error in setting up %d rxdesc ring. ret: %d",
+ 			       rxdesc_ring->ring_id, ret);
+-			while (--ring_idx >= 0)
++			while (ring_idx) {
++				ring_idx--;
+ 				edma_cfg_rx_desc_ring_cleanup(&edma_ctx->rx_rings[ring_idx]);
++			}
+ 
+ 			goto rxdesc_mem_alloc_fail;
+ 		}
+diff --git a/drivers/net/ethernet/qualcomm/ppe/edma_rx.c b/drivers/net/ethernet/qualcomm/ppe/edma_rx.c
+index 068dd44..dfea5b0 100644
+--- a/drivers/net/ethernet/qualcomm/ppe/edma_rx.c
++++ b/drivers/net/ethernet/qualcomm/ppe/edma_rx.c
+@@ -150,8 +150,7 @@ static inline uint8_t edma_rx_checksum_verify(struct edma_rxdesc_pri *rxdesc_pri
+ }
+ 
+ static void edma_rx_process_last_segment(struct edma_rxdesc_ring *rxdesc_ring,
+-					 struct edma_rxdesc_pri *rxdesc_pri,
+-					 struct sk_buff *skb)
++					struct edma_rxdesc_pri *rxdesc_pri)
+ {
+ 	bool page_mode = rxdesc_ring->rxfill->page_mode;
+ 	struct edma_port_pcpu_stats *pcpu_stats;
+@@ -168,7 +167,7 @@ static void edma_rx_process_last_segment(struct edma_rxdesc_ring *rxdesc_ring,
+ 
+ 	/* Check Rx checksum offload status. */
+ 	if (likely(dev->features & NETIF_F_RXCSUM))
+-		skb->ip_summed = edma_rx_checksum_verify(rxdesc_pri, skb_head);
++		skb_head->ip_summed = edma_rx_checksum_verify(rxdesc_pri, skb_head);
+ 
+ 	/* Get stats for the netdevice. */
+ 	port_dev = netdev_priv(dev);
+@@ -270,7 +269,7 @@ static void edma_rx_handle_frag_list(struct edma_rxdesc_ring *rxdesc_ring,
+ 	if (EDMA_RXDESC_MORE_BIT_GET(rxdesc_pri))
+ 		return;
+ 
+-	edma_rx_process_last_segment(rxdesc_ring, rxdesc_pri, skb);
++	edma_rx_process_last_segment(rxdesc_ring, rxdesc_pri);
+ }
+ 
+ static void edma_rx_handle_nr_frags(struct edma_rxdesc_ring *rxdesc_ring,
+@@ -312,7 +311,7 @@ static void edma_rx_handle_nr_frags(struct edma_rxdesc_ring *rxdesc_ring,
+ 	if (EDMA_RXDESC_MORE_BIT_GET(rxdesc_pri))
+ 		return;
+ 
+-	edma_rx_process_last_segment(rxdesc_ring, rxdesc_pri, skb);
++	edma_rx_process_last_segment(rxdesc_ring, rxdesc_pri);
+ }
+ 
+ static bool edma_rx_handle_linear_packets(struct edma_rxdesc_ring *rxdesc_ring,
+@@ -347,7 +346,6 @@ static bool edma_rx_handle_linear_packets(struct edma_rxdesc_ring *rxdesc_ring,
+ 		u64_stats_update_begin(&rx_stats->syncp);
+ 		rx_stats->rx_nr_frag_headroom_err++;
+ 		u64_stats_update_end(&rx_stats->syncp);
+-		dev_kfree_skb_any(skb);
+ 
+ 		return false;
+ 	}
+@@ -501,6 +499,7 @@ static int edma_rx_reap(struct edma_rxdesc_ring *rxdesc_ring, int budget)
+ 
+ 		/* Get the next Rx descriptor. */
+ 		next_rxdesc_pri = EDMA_RXDESC_PRI_DESC(rxdesc_ring, cons_idx);
++		next_skb = (struct sk_buff *)EDMA_RXDESC_OPAQUE_GET(next_rxdesc_pri);
+ 
+ 		/* Handle linear packets or initial segments first. */
+ 		if (likely(!(rxdesc_ring->head))) {
+@@ -516,9 +515,6 @@ static int edma_rx_reap(struct edma_rxdesc_ring *rxdesc_ring, int budget)
+ 
+ 			/* Handle linear packets. */
+ 			if (likely(!EDMA_RXDESC_MORE_BIT_GET(rxdesc_pri))) {
+-				next_skb =
+-					(struct sk_buff *)EDMA_RXDESC_OPAQUE_GET(next_rxdesc_pri);
+-
+ 				if (unlikely(!
+ 					     edma_rx_handle_linear_packets(rxdesc_ring,
+ 									   rxdesc_pri, skb)))
+@@ -528,8 +524,6 @@ static int edma_rx_reap(struct edma_rxdesc_ring *rxdesc_ring, int budget)
+ 			}
+ 		}
+ 
+-		next_skb = (struct sk_buff *)EDMA_RXDESC_OPAQUE_GET(next_rxdesc_pri);
+-
+ 		/* Handle scatter frame processing for first/middle/last segments. */
+ 		page_mode ? edma_rx_handle_nr_frags(rxdesc_ring, rxdesc_pri, skb) :
+ 			edma_rx_handle_frag_list(rxdesc_ring, rxdesc_pri, skb);
