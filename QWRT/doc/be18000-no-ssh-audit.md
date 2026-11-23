@@ -3,6 +3,12 @@
 Date: 2026-11-22. Second-pass source snapshot:
 `b1522ec3ccef68a82feb08531e841bdbe88ec1ad`.
 
+**Follow-up:** the subsequent [code review and repairs](be18000-code-review-fixes.md)
+addresses the ath12k, EDMA and QCA8084 defects identified below, along with
+the PCI bridge description and factory-image size guard. The second-pass
+findings in this document describe the pre-repair snapshot above; use the
+follow-up report for current implementation and validation status.
+
 The owner built and flashed the factory image and reported no SSH access.
 The factory filename is confirmed; the exact writer, emitted boot log,
 client SSH error and resulting overlay have not been observed in this audit.

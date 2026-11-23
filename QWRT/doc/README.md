@@ -23,6 +23,7 @@ Read the reports in order; later reports refine earlier unknowns:
 15. [OpenWrt FIT vs live QWRT FIT cross-check](be18000-fit-crosscheck.md)
 16. [Recovery and first-flash runbook (MAX layout)](be18000-recovery-runbook.md)
 17. [No-SSH audit after the first flash: fixes and second-pass findings](be18000-no-ssh-audit.md)
+18. [Follow-up code review: ath12k startup, EDMA and QCA8084 repairs](be18000-code-review-fixes.md)
 
 The owner's router is the 6 GHz hardware conversion identified by QWRT as
 `xiaomi,be18000`. Start with the [modified-unit source comparison](be10000-be18000-openwrt-gap-rounds.md#owners-modified-be10000-be18000-firmware-profile)
@@ -32,13 +33,14 @@ working system and the installer-supplied QSDK13 image.
 ## Current conclusions
 
 - The owner has reported no SSH after flashing a factory image. PPE
-  cleanup/NAPI teardown and QCA8084 startup-order fixes are on `master`
-  (`c463915`, `b1522ec`) and passed actual ARM64 driver compilation against
-  the fully patched Linux 6.18.64 source. A second source audit identified
-  conditional ath12k and EDMA failure paths; none has yet been matched to
-  a runtime log from the failed boot. See the
-  [no-SSH audit](be18000-no-ssh-audit.md) for evidence, limits and stage
-  discriminators. These changes need a rebuilt image for device validation.
+  cleanup/NAPI teardown and QCA8084 startup-order fixes (`c463915`,
+  `b1522ec`) are followed by repairs for the conditional ath12k group
+  startup deadlock, EDMA RX/TX ownership and cleanup, and QCA8084 package
+  lifetime. See the [follow-up code review](be18000-code-review-fixes.md)
+  for the fixes and actual ARM64 compilation results, and the
+  [no-SSH audit](be18000-no-ssh-audit.md) for the boot-chain evidence and
+  stage discriminators. No specific defect has yet been matched to a
+  runtime log from the failed boot. Device validation needs a rebuilt image.
 - Phase A/B/C/D-G has an offline `qualcommbe/ipq95xx` image for
   `xiaomi,be18000`: FIT `config@al02-c4`, gzip `0x42080000`, UBI
   `kernel`/`rootfs`/`rootfs_data`, the live 292,256-byte Xiaomi board-2,
