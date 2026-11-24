@@ -30,8 +30,24 @@ ln6001_reset_bootcount() {
 }
 
 boot() {
-	[ "$(board_name)" = 'linksys,ln6001' ] || return 0
-	. /lib/upgrade/ln6001.sh
-	ln6001_active_slot >/dev/null || return 1
-	ln6001_reset_bootcount /dev/mmcblk0p22
+	case "$(board_name)" in
+	linksys,ln6001)
+		. /lib/upgrade/ln6001.sh
+		ln6001_active_slot >/dev/null || return 1
+		ln6001_reset_bootcount /dev/mmcblk0p22
+		;;
+	xiaomi,be18000)
+		local wan_up
+		wan_up="$(ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)"
+		if [ "$wan_up" = "true" ]; then
+			echo 0 > /sys/class/leds/rgb:red/brightness 2>/dev/null
+			echo 20 > /sys/class/leds/rgb:green/brightness 2>/dev/null
+			echo 255 > /sys/class/leds/rgb:blue/brightness 2>/dev/null
+		else
+			echo 48 > /sys/class/leds/rgb:red/brightness 2>/dev/null
+			echo 16 > /sys/class/leds/rgb:green/brightness 2>/dev/null
+			echo 0 > /sys/class/leds/rgb:blue/brightness 2>/dev/null
+		fi
+		;;
+	esac
 }

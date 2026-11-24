@@ -70,6 +70,33 @@
 		clock-frequency = <312500000>;
 	};
 
+	regulator_fixed_3p3: s3300 {
+		compatible = "regulator-fixed";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-boot-on;
+		regulator-always-on;
+		regulator-name = "fixed_3p3";
+	};
+
+	regulator_fixed_1p8: s1800 {
+		compatible = "regulator-fixed";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-boot-on;
+		regulator-always-on;
+		regulator-name = "fixed_1p8";
+	};
+
+	regulator_fixed_0p925: s0925 {
+		compatible = "regulator-fixed";
+		regulator-min-microvolt = <925000>;
+		regulator-max-microvolt = <925000>;
+		regulator-boot-on;
+		regulator-always-on;
+		regulator-name = "fixed_0p925";
+	};
+
 	reserved-memory {
 		/*
 		 * TrustZone application RAM from the live QWRT DT.  The
@@ -125,6 +152,17 @@
 			console-size = <0x20000>;
 			pmsg-size = <0x20000>;
 			ftrace-size = <0x20000>;
+			no-map;
+		};
+
+		/* Preserve both no-map ranges from the working QWRT board DT. */
+		rsvd1@67300000 {
+			reg = <0x0 0x67300000 0x0 0x40000>;
+			no-map;
+		};
+
+		rsvd2@67340000 {
+			reg = <0x0 0x67340000 0x0 0x40000>;
 			no-map;
 		};
 	};
@@ -277,11 +315,8 @@
 		#size-cells = <1>;
 
 		nand-ecc-engine = <&qpic_nand>;
-		nand-ecc-strength = <4>;
+		nand-ecc-strength = <8>;
 		nand-ecc-step-size = <512>;
-		nand-bus-width = <8>;
-		spi-rx-bus-width = <4>;
-		spi-tx-bus-width = <4>;
 
 		partitions {
 			compatible = "fixed-partitions";
@@ -454,6 +489,7 @@
 			};
 
 			partition@1780000 {
+				compatible = "linux,ubi";
 				label = "rootfs";
 				reg = <0x1780000 0xbe00000>;
 				linux,rootfs;
@@ -708,7 +744,6 @@
 			phy-mode = "10g-qxgmii";
 			phy-handle = <&qca8084_phy1>;
 			pcs-handle = <&pcs0_ch0>;
-			managed = "in-band-status";
 			label = "lan1";
 
 			nvmem-cells = <&ethaddr 1>;
@@ -730,7 +765,6 @@
 			phy-mode = "10g-qxgmii";
 			phy-handle = <&qca8084_phy2>;
 			pcs-handle = <&pcs0_ch1>;
-			managed = "in-band-status";
 			label = "lan2";
 
 			nvmem-cells = <&ethaddr 1>;
@@ -752,7 +786,6 @@
 			phy-mode = "10g-qxgmii";
 			phy-handle = <&qca8084_phy3>;
 			pcs-handle = <&pcs0_ch2>;
-			managed = "in-band-status";
 			label = "lan3";
 
 			nvmem-cells = <&ethaddr 1>;
@@ -774,7 +807,6 @@
 			phy-mode = "10g-qxgmii";
 			phy-handle = <&qca8084_phy4>;
 			pcs-handle = <&pcs0_ch3>;
-			managed = "in-band-status";
 			label = "lan4";
 
 			nvmem-cells = <&ethaddr 1>;
@@ -847,6 +879,7 @@
 &blsp1_i2c1 {
 	pinctrl-0 = <&i2c1_pins>;
 	pinctrl-names = "default";
+	clock-frequency = <400000>;
 	status = "okay";
 
 	/* Xiaomi NFC is a vendor driver; keep the address documented only. */
@@ -860,6 +893,7 @@
 &blsp1_i2c3 {
 	pinctrl-0 = <&i2c3_pins>;
 	pinctrl-names = "default";
+	clock-frequency = <380000>;
 	status = "okay";
 
 	temperature-sensor@4c {
@@ -867,10 +901,46 @@
 		reg = <0x4c>;
 	};
 
-	fan-controller@2f {
+	emc2305: fan-controller@2f {
 		compatible = "microchip,emc2305";
 		reg = <0x2f>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		#pwm-cells = <3>;
+
+		fan@0 {
+			reg = <0>;
+			pwms = <&emc2305 26000 0 1>;
+		};
 	};
+};
+
+&blsp1_i2c4 {
+	pinctrl-0 = <&i2c4_pins>;
+	pinctrl-names = "default";
+	clock-frequency = <400000>;
+	status = "okay";
+};
+
+&usb_0_dwc3 {
+	dr_mode = "host";
+};
+
+&usb_0_qmpphy {
+	vdda-pll-supply = <&regulator_fixed_1p8>;
+	vdda-phy-supply = <&regulator_fixed_0p925>;
+	status = "okay";
+};
+
+&usb_0_qusbphy {
+	vdd-supply = <&regulator_fixed_0p925>;
+	vdda-pll-supply = <&regulator_fixed_1p8>;
+	vdda-phy-dpdm-supply = <&regulator_fixed_3p3>;
+	status = "okay";
+};
+
+&usb3 {
+	status = "okay";
 };
 
 &tlmm {
@@ -914,19 +984,19 @@
 	pwm_pins: pwm-pins {
 		mux-1 {
 			pins = "gpio31";
-			function = "pwm11";
+			function = "pwm";
 			drive-strength = <8>;
 		};
 
 		mux-2 {
 			pins = "gpio32";
-			function = "pwm21";
+			function = "pwm";
 			drive-strength = <8>;
 		};
 
 		mux-3 {
 			pins = "gpio33";
-			function = "pwm31";
+			function = "pwm";
 			drive-strength = <8>;
 		};
 	};
@@ -980,6 +1050,13 @@
 	i2c3_pins: i2c3-pins {
 		pins = "gpio15", "gpio16";
 		function = "blsp3_i2c";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	i2c4_pins: i2c4-pins {
+		pins = "gpio50", "gpio51";
+		function = "blsp4_i2c";
 		drive-strength = <8>;
 		bias-disable;
 	};

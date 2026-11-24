@@ -1,0 +1,53 @@
+From: Xiaomi BE18000 OpenWrt port
+Subject: [PATCH] spi: spi-qpic-snand: accept all SPI-NAND program load opcodes
+
+qcom_spi_is_page_op() advertises support for all SPI-NAND program-load
+variants (0x02 x1 load, 0x84 x1 random load, 0x32 x4 quad load, 0x34 x4
+quad random load), and spinand_write_to_cache_op() uses the write_cache
+template (0x02 or 0x32) for page writes.
+
+However, qcom_spi_cmd_mapping() and qcom_spi_write_page() only handled
+0x84 (SPINAND_PROGRAM_LOAD), returning -EOPNOTSUPP on every normal
+SPI-NAND page write while erases (0xd8) succeeded.
+
+Accept 0x02, 0x32, 0x34, and 0x84 in qcom_spi_cmd_mapping() and
+qcom_spi_write_page() so qcom_spi_program_execute() receives the page
+data buffer for all program-load opcodes.
+
+--- a/drivers/spi/spi-qpic-snand.c
++++ b/drivers/spi/spi-qpic-snand.c
+@@ -52,6 +52,9 @@
+ #define SPINAND_ERASE			0xd8
+ #define SPINAND_WRITE_EN		0x06
+ #define SPINAND_PROGRAM_EXECUTE		0x10
++#define SPINAND_PROGRAM_LOAD_X1		0x02
++#define SPINAND_PROGRAM_LOAD_X4		0x32
++#define SPINAND_PROGRAM_LOAD_RAND_X4	0x34
+ #define SPINAND_PROGRAM_LOAD		0x84
+ 
+ #define ACC_FEATURE			0xe
+@@ -1295,8 +1298,11 @@
+ 		*cmd = (PAGE_ACC | LAST_PAGE | SPI_TRANSFER_MODE_x1 |
+ 				SPI_WP | SPI_HOLD | OP_PROGRAM_PAGE);
+ 		break;
++	case SPINAND_PROGRAM_LOAD_X1:
++	case SPINAND_PROGRAM_LOAD_X4:
++	case SPINAND_PROGRAM_LOAD_RAND_X4:
+ 	case SPINAND_PROGRAM_LOAD:
+-		*cmd = SPINAND_PROGRAM_LOAD;
++		*cmd = opcode;
+ 		break;
+ 	default:
+ 		dev_err(snandc->dev, "Opcode not supported: %u\n", opcode);
+@@ -1316,7 +1322,10 @@
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	if (op->cmd.opcode == SPINAND_PROGRAM_LOAD)
++	if (op->cmd.opcode == SPINAND_PROGRAM_LOAD ||
++	    op->cmd.opcode == SPINAND_PROGRAM_LOAD_X1 ||
++	    op->cmd.opcode == SPINAND_PROGRAM_LOAD_X4 ||
++	    op->cmd.opcode == SPINAND_PROGRAM_LOAD_RAND_X4)
+ 		snandc->qspi->data_buf = (u8 *)op->data.buf.out;
+ 
+ 	return 0;

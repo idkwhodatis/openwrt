@@ -107,16 +107,26 @@ split the rootfs area. If a MIBIB reflash is ever needed, use MAX.
     1,048,576 bytes (derived from the partition map, not separately proven).
     The 262,144-byte `mibib.bin` in the ZIP is therefore a `mtd write` file, not
     a web-UI file; pad it to 1 MiB if the web page is used.
-- Firmware update path uses UBI volumes, not a raw mtd write:
-
-  ```text
-  ubi remove rootfs_data && ubi remove %s && ubi create %s 0x%x
-      && ubi write 0x%x %s 0x%x && ubi create rootfs_data
-  ```
-
-  This matches the QWRT layout (UBI on mtd `rootfs`, volumes `kernel`,
-  `rootfs`, `rootfs_data`). It is **not** a `ubiformat` of a whole UBI image,
-  so the exact QWRT firmware container format is still unproven.
+- **A whole UBI upload has its own Firmware handler branch.** Thumb
+  disassembly of the live-matched binary (offsets below are file offsets)
+  shows the classifier at `0x55964`. After checking a separate marker at
+  offset `0x5c`, it checks the first four bytes for `UBI#` and returns 3.
+  The 17,432,576-byte preinit debug factory image (SHA-256 `da37791b…`)
+  has `ff ff ff ff` at `0x5c` and `UBI#` at zero, so it selects this branch.
+- The Firmware handler compares the result to 3 at `0x5910a`. The matching
+  branch uses the command string at `0x64b6f`, which sets `bootargs` and
+  `fsbootargs` including `ubi.mtd=rootfs`, sets `bootcmd=bootipq`, saves the
+  environment, erases two 512 KiB ranges starting at `0x400000` and
+  `0x480000`, then issues `flash rootfs`. The board partition map names
+  those ranges `0:BOOTCONFIG` and `0:BOOTCONFIG1`. The sequence uses
+  semicolons. Its presence does not establish the result of each operation
+  during the owner's upload.
+- The related QSDK source (`common/cmd_flashwrite.c`, `do_flash`) first
+  looks up the named NAND partition. The UBI-volume writer is a fallback
+  when partition lookup fails. The live partition table has a physical
+  `rootfs` partition. The separate volume-replacement string at `0x72d2b`
+  therefore does not establish a volume-by-volume web upload. The actual
+  post-flash partition contents have not been read back.
 - The built-in default environment is minimal
   (`ipaddr=192.168.1.1`, `serverip=192.168.1.2`, `bootdelay=2`,
   `bootargs=console=ttyMSM0,115200n8`, `bootcmd=bootipq`). The live

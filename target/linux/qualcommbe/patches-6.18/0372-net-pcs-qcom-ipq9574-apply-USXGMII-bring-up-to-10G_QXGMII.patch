@@ -1,0 +1,73 @@
+From: Xiaomi BE18000 OpenWrt port
+Subject: [PATCH] net: pcs: qcom-ipq9574: apply USXGMII SerDes bring-up to 10G_QXGMII
+
+Patches 0360 and 0361 fixed the IPQ9574 UNIPHY SerDes bring-up for
+PHY_INTERFACE_MODE_USXGMII (setting MISC2 phy mode to 0x7, clearing
+PCS_DETECT_LOS_FROM_SFP for in-band link detection, and writing the full
+PCS_PLL_RESET assert/release values 0x2bf/0x2ff), but omitted
+PHY_INTERFACE_MODE_10G_QXGMII.
+
+10G_QXGMII (QCA8084 quad 2.5G PHY) uses the same 10.3125 Gbps 10GBASE-R
+UNIPHY SerDes personality as USXGMII; without these writes UNIPHY0 stays
+in its power-on SGMII personality and QCA8084 BaseR/QXGMII never links up.
+
+Also wait for XPCS_SOFT_RESET to clear after configuring 10G_QXGMII mode
+(otherwise subsequent MII AN writes race with the soft reset) and clear
+the latched XPCS_MII_AN_CL37_CMPLT bit when reading USXGMII/QXGMII link
+state.
+
+--- a/drivers/net/pcs/pcs-qcom-ipq9574.c
++++ b/drivers/net/pcs/pcs-qcom-ipq9574.c
+@@ -251,6 +251,9 @@
+ 		return;
+ 	}
+ 
++	if (val & XPCS_MII_AN_CL37_CMPLT)
++		regmap_clear_bits(qpcs->regmap, reg, XPCS_MII_AN_CL37_CMPLT);
++
+ 	state->link = !!(val & XPCS_USXG_AN_LINK_STS);
+ 
+ 	if (!state->link)
+@@ -387,7 +390,8 @@
+ 			goto err_clk;
+ 	}
+ 
+-	if (interface == PHY_INTERFACE_MODE_USXGMII)
++	if (interface == PHY_INTERFACE_MODE_USXGMII ||
++	    interface == PHY_INTERFACE_MODE_10G_QXGMII)
+ 		misc2 = PCS_MISC2_MODE_USXGMII;
+ 
+ 	if (misc2) {
+@@ -399,7 +403,8 @@
+ 	}
+ 
+ 	/* Link detection is in-band; there is no SFP LOS input here */
+-	if (interface == PHY_INTERFACE_MODE_USXGMII) {
++	if (interface == PHY_INTERFACE_MODE_USXGMII ||
++	    interface == PHY_INTERFACE_MODE_10G_QXGMII) {
+ 		ret = regmap_update_bits(qpcs->regmap, PCS_LINK_DETECT,
+ 					 PCS_DETECT_LOS_FROM_SFP, 0);
+ 		if (ret)
+@@ -419,7 +424,8 @@
+ 	}
+ 
+ 	/* PCS PLL reset */
+-	if (interface == PHY_INTERFACE_MODE_USXGMII) {
++	if (interface == PHY_INTERFACE_MODE_USXGMII ||
++	    interface == PHY_INTERFACE_MODE_10G_QXGMII) {
+ 		/* Program the whole register: the analog enables must not
+ 		 * be left at their power-on state.
+ 		 */
+@@ -579,6 +585,12 @@
+ 			ret = regmap_set_bits(qpcs->regmap, XPCS_DIG_CTRL, XPCS_SOFT_RESET);
+ 			if (ret)
+ 				return ret;
++
++			ret = regmap_read_poll_timeout(qpcs->regmap, XPCS_DIG_CTRL,
++						       val, !(val & XPCS_SOFT_RESET),
++						       1000, 100000);
++			if (ret)
++				dev_warn(qpcs->dev, "XPCS soft reset timed-out\n");
+ 		}
+ 	}
+ 

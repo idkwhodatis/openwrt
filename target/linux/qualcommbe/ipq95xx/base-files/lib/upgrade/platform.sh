@@ -99,6 +99,7 @@ platform_do_upgrade() {
 		ln6001_do_upgrade "$1" || return 1
 		;;
 	xiaomi,be18000)
+		CI_UBIPART="rootfs"
 		CI_KERNPART="kernel"
 		CI_ROOTPART="rootfs"
 		CI_DATAPART="rootfs_data"

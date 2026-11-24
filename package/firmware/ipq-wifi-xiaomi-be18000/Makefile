@@ -24,6 +24,7 @@ PKG_RELEASE:=1
 PKG_MAINTAINER:=OpenWrt BE18000 port
 PKG_LICENSE:=Proprietary
 PKGARCH:=all
+PKG_CONFIG_DEPENDS += CONFIG_BE18000_TESTING
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -42,8 +43,25 @@ Installs the live Xiaomi BE18000 board-2.bin (2.4/5/6 GHz BDFs and regdb)
 over the generic ath12k QCN9274 board data.  Use only on the BE18000.
 endef
 
+define Package/ipq-wifi-xiaomi_be18000/config
+  config BE18000_TESTING
+	bool "Enable Xiaomi BE18000 board testing diagnostics"
+	default n
+	help
+	  Include board bring-up probes in debug images. Leave off for production.
+endef
+
 define Package/ipq-wifi-xiaomi_be18000/install
 endef
+
+ifeq ($(CONFIG_BE18000_TESTING),y)
+define Package/ipq-wifi-xiaomi_be18000/install
+	$(INSTALL_DIR) $(1)/etc/init.d $(1)/usr/libexec/be18000-testing $(1)/lib/preinit
+	$(INSTALL_DATA) ./testing/preinit-led $(1)/lib/preinit/01_be18000_test_led
+	$(INSTALL_BIN) ./testing/boot-led.init $(1)/etc/init.d/be18000-test-led
+	$(INSTALL_BIN) ./testing/boot-led.sh $(1)/usr/libexec/be18000-testing/boot-led
+endef
+endif
 
 define Package/ipq-wifi-xiaomi_be18000/install-overlay
 	$(INSTALL_DIR) $(1)/lib/firmware/ath12k/QCN9274/hw2.0

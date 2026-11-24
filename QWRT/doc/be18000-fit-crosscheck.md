@@ -1,8 +1,70 @@
 # BE18000 OpenWrt FIT vs live QWRT FIT cross-check
 
-Status: offline check of the candidate rebuilt at merge `7c4b10bc78` on
-2026-11-22. No hardware was used. This closes the "does our FIT match what
-`bootipq` expects" question.
+## Current preinit-debug factory image
+
+Compared `build/debug/factory.ubi` (SHA-256
+`da37791bd5a5526ff23de5dcf4d59d90d4ecf42f2c4317a17eda42a7cb5c7e75`)
+with the saved working QWRT kernel volume. The full QWRT dump hashes to
+`bc08f017d701c058b8a0800e36b363ca0b622b77d0b85be387eb4fc680822fa1`,
+matching the independent volume extraction from the pre-flash backup.
+The debug FIT was reconstructed from volume 0 in logical eraseblock order.
+
+| Measurement | Working QWRT | Preinit debug |
+| --- | ---: | ---: |
+| FIT totalsize, excluding volume padding | 5,484,624 | 6,041,636 |
+| Gzip payload bytes | 5,397,564 | 5,994,683 |
+| Decompressed arm64 Image bytes | 12,118,024 | 15,124,488 |
+| ARM64 header text_offset | 0x80000 | 0 |
+| ARM64 header image_size | 12,554,240 | 15,466,496 |
+| FIT load and entry | 0x42080000 | 0x42080000 |
+
+Selected the named config in each FIT, followed both references and
+recomputed CRC32 and SHA-1 over each referenced payload. All eight checks
+passed. Both gzip streams decompressed and both outputs have the ARM64
+Image magic. Debug FIT SHA-256 over its exact totalsize is
+`3b874203b80dd9b4aec0b952d3428e7df04092be2eade346eb463c03fab33d3f`.
+
+**Selection.** File offsets below refer to the live-matched APPSBL executable.
+The NAND path contains a named UBI read of `kernel`. At `0x14d72` the
+boot path checks the image at `0x50000000`; its FIT branch calls the
+selector at `0x14b04`. It checks an environment override named
+`config_name`, otherwise iterates the control FDT's root `config_name`
+strings, looks each name up in the uploaded FIT, and formats
+`bootm 0x%x#%s` on success. Lookup failure can return an error.
+The FIT default alone is therefore insufficient proof. The saved
+environment has no override. The control FDT's runtime list has not been
+recovered, but the known working FIT has the same **single** configuration
+`config@al02-c4` as debug. With the same selector inputs, any name that
+selects the working FIT selects the candidate. Its references to
+`kernel-1` and `fdt-1` both resolve.
+
+**Load.** The installed bootloader passes a 64 MiB output limit at
+`0x1b82a` to the image loader; its gzip branch passes that limit to the
+decompressor at `0x1b78a`. The debug output fits, and its destination
+is clear of the staged FIT at `0x50000000`. Successful handoff remains
+unobserved. Unlike QWRT, the debug Image's zero text offset paired with
+the inherited FIT load address misses the arm64 boot protocol's 2 MiB
+base alignment by 512 KiB. The debug kernel is relocatable; see the
+[alignment assessment](be18000-no-ssh-audit.md). This is a real difference
+without a demonstrated boot failure.
+
+**Root filesystem.** The saved QWRT runtime cmdline in
+`backup/be18000-20261122/device/logs/identity.txt` contains both the
+environment argument sets, then the DT-appended block root. The installed
+binary references the concatenation of `bootargs`, `fsbootargs` and
+`rootwait` at `0x148e0`. With the same environment and handoff, debug
+inherits `ubi.mtd=rootfs` and `rootfstype=squashfs`; its own DT and
+kernel patch append the final `root=/dev/ubiblock0_1`. Candidate volume
+1 is named `rootfs` and starts with SquashFS magic. The built kernel enables
+UBI block and rootfs auto-block creation. If the duplicate attachment
+attempt fails after a successful first attach, built-in UBI keeps the first
+attachment (`drivers/mtd/ubi/build.c`, `ubi_init_attach`). This does not
+verify that NAND actually registered, attached or mounted on the failed boot.
+
+## Earlier baseline
+
+The following comparison covers the candidate rebuilt at merge `7c4b10bc78`
+on 2026-11-22.
 
 ## Artifacts
 

@@ -1,0 +1,30 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Xiaomi BE18000 ambient RGB bar & network LED status indicator:
+#   WAN up   -> Light blue (R=0, G=20, B=255) + net_white on
+#   WAN down -> Orange     (R=48, G=16, B=0)  + net_orange on
+
+. /lib/functions.sh
+
+[ "$(board_name)" = "xiaomi,be18000" ] || exit 0
+[ "$INTERFACE" = "wan" ] || exit 0
+
+set_rgb() {
+	[ -w /sys/class/leds/rgb:red/brightness ] && echo "$1" > /sys/class/leds/rgb:red/brightness
+	[ -w /sys/class/leds/rgb:green/brightness ] && echo "$2" > /sys/class/leds/rgb:green/brightness
+	[ -w /sys/class/leds/rgb:blue/brightness ] && echo "$3" > /sys/class/leds/rgb:blue/brightness
+}
+
+case "$ACTION" in
+ifup)
+	set_rgb 0 20 255
+	[ -w /sys/class/leds/net_orange/brightness ] && echo 0 > /sys/class/leds/net_orange/brightness
+	[ -w /sys/class/leds/net_white/brightness ] && echo 1 > /sys/class/leds/net_white/brightness
+	;;
+ifdown)
+	set_rgb 48 16 0
+	[ -w /sys/class/leds/net_white/brightness ] && echo 0 > /sys/class/leds/net_white/brightness
+	[ -w /sys/class/leds/net_orange/brightness ] && echo 1 > /sys/class/leds/net_orange/brightness
+	;;
+esac

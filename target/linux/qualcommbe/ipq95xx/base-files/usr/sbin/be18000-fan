@@ -1,0 +1,62 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Lightweight thermal-to-PWM fan controller for Xiaomi BE18000 (EMC2301).
+# Tracks the hottest SoC TSENS thermal zone and ramps PWM linearly:
+#   < 45 C  -> PWM 35  (~14%, quiet baseline)
+#   45..80C -> linear ramp 35..255
+#   >= 80 C -> PWM 255 (100%, full speed)
+
+START_TEMP=45
+MAX_TEMP=80
+MIN_PWM=35
+MAX_PWM=255
+POLL_INTERVAL=5
+
+find_pwm() {
+	local p
+	for p in /sys/bus/i2c/devices/1-002f/hwmon/hwmon*/pwm1; do
+		[ -w "$p" ] && { echo "$p"; return 0; }
+	done
+	for p in /sys/class/hwmon/hwmon*/name; do
+		[ "$(cat "$p" 2>/dev/null)" = "emc2305" ] || continue
+		p="${p%/name}/pwm1"
+		[ -w "$p" ] && { echo "$p"; return 0; }
+	done
+	return 1
+}
+
+read_max_temp_c() {
+	local z t max=0
+	for z in /sys/class/thermal/thermal_zone*/temp; do
+		[ -r "$z" ] || continue
+		t="$(cat "$z" 2>/dev/null)"
+		case "$t" in
+			''|*[!0-9-]*) continue ;;
+		esac
+		[ "$t" -gt "$max" ] && max="$t"
+	done
+	echo $((max / 1000))
+}
+
+last_pwm=-1
+while true; do
+	pwm_path="$(find_pwm)"
+	if [ -n "$pwm_path" ]; then
+		temp_c="$(read_max_temp_c)"
+		if [ "$temp_c" -lt "$START_TEMP" ]; then
+			target="$MIN_PWM"
+		elif [ "$temp_c" -ge "$MAX_TEMP" ]; then
+			target="$MAX_PWM"
+		else
+			target=$((MIN_PWM + (temp_c - START_TEMP) * (MAX_PWM - MIN_PWM) / (MAX_TEMP - START_TEMP)))
+		fi
+
+		if [ "$target" -ne "$last_pwm" ]; then
+			if echo "$target" > "$pwm_path" 2>/dev/null; then
+				last_pwm="$target"
+			fi
+		fi
+	fi
+	sleep "$POLL_INTERVAL"
+done
