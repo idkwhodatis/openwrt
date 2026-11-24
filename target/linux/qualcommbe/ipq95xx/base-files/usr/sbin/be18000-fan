@@ -15,6 +15,9 @@ POLL_INTERVAL=5
 
 find_pwm() {
 	local p
+	if [ -d /sys/bus/i2c/devices/1-002f ] && [ ! -e /sys/bus/i2c/devices/1-002f/driver ]; then
+		echo 1-002f > /sys/bus/i2c/drivers/emc2305/bind 2>/dev/null
+	fi
 	for p in /sys/bus/i2c/devices/1-002f/hwmon/hwmon*/pwm1; do
 		[ -w "$p" ] && { echo "$p"; return 0; }
 	done
